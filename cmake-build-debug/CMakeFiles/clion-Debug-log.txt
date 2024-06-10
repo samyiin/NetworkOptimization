@@ -1,4 +1,13 @@
-/usr/local/APP/jetbrains/clion/2023.2/bin/cmake/linux/x64/bin/cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MAKE_PROGRAM=/usr/local/APP/jetbrains/clion/2023.2/bin/ninja/linux/x64/ninja -G Ninja -S /cs/usr/hsiny/NetworkOptimization -B /cs/usr/hsiny/NetworkOptimization/cmake-build-debug
+/Users/samyiin/Applications/CLion.app/Contents/bin/cmake/mac/aarch64/bin/cmake -DCMAKE_BUILD_TYPE=Debug -G "CodeBlocks - Unix Makefiles" -S /Users/samyiin/Projects/NetworkOptimization -B /Users/samyiin/Projects/NetworkOptimization/cmake-build-debug
+CMake Deprecation Warning:
+  Support for "Extra Generators" like
+
+    CodeBlocks
+
+  is deprecated and will be removed from a future version of CMake.  IDEs may
+  use the cmake-file-api(7) to view CMake-generated project build trees.
+
+
 -- Configuring done (0.0s)
 -- Generating done (0.0s)
--- Build files have been written to: /cs/usr/hsiny/NetworkOptimization/cmake-build-debug
+-- Build files have been written to: /Users/samyiin/Projects/NetworkOptimization/cmake-build-debug

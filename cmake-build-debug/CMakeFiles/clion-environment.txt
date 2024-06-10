@@ -1,3 +1,4 @@
-ToolSet: 1.0 (local)Options: 
+ToolSet: 1.0 (local)Ninja: 1.12.0@/Users/samyiin/Applications/CLion.app/Contents/bin/ninja/mac/aarch64/ninja
+Options: 
 
-Options:-DCMAKE_MAKE_PROGRAM=/usr/local/APP/jetbrains/clion/2023.2/bin/ninja/linux/x64/ninja
+Options:

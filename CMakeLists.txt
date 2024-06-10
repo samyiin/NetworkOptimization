@@ -3,6 +3,8 @@ project(NetworkOptimization C)
 
 set(CMAKE_C_STANDARD 11)
 
-add_executable(NetworkOptimization main.c
+add_executable(NetworkOptimization
         Benchmark/server.c
-        Benchmark/server.h)
+        Benchmark/server.h
+        Benchmark/client.c
+        Benchmark/client.h)
