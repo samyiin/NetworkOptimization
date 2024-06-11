@@ -1,8 +1,0 @@
-//
-// Created by hsiny on 6/3/24.
-//
-
-#ifndef NETWORKOPTIMIZATION_SERVER_H
-#define NETWORKOPTIMIZATION_SERVER_H
-
-#endif //NETWORKOPTIMIZATION_SERVER_H

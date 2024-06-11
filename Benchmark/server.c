@@ -1,8 +1,6 @@
 //
 // Created by hsiny on 6/3/24.
 //
-
-#include "server.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +10,8 @@
 #define SERVER_IP "127.0.0.1"   // loopback address: only listen to clients on this machine
 // INADDR_ANY: to bind to all available interface
 #define PORT 8080
+#define END_MESSAGE 'z' // this is a char, not a string as in Client.c, this way it's easier for comparason
+#define RECEIVE_MESSAGE "R"
 
 int main() {
     int server_fd, new_socket;
@@ -40,10 +40,10 @@ int main() {
     address.sin_family = AF_INET;
     // Convert IPv4 addresses from text to binary form (pton: presentation to network)
     // AF_INET specifies that the address family is IPv4.
-    // src: server_ip: is the string representation of the IP address ("127.0.0.1").
+    // src: server_ip: is the string representation of the IP address.
     // dst: serv_addr.sin_addr: A pointer to a buffer where the function will store the binary representation of the
-    // IP address. If the conversion is successful, "dest".s_addr will contain the binary representation of the
-    // IP address. (It will store in the s_addr attribute of it).
+    //       IP address. If the conversion is successful, "dest".s_addr will contain the binary representation of the
+    //       IP address. (It will store in the s_addr attribute of it).
     // Legacy: address.sin_addr.s_addr = inet_addr(server_ip)
     if (inet_pton(AF_INET, SERVER_IP, &address.sin_addr) <= 0) {
         printf("\nInvalid address/ Address not supported \n");
@@ -70,6 +70,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
+    // Sam's note for accpet()
     // accept(server_fd,...) is server.accept in oop
     // it will take one connection from the queue above, and create a new socket for that connection. If there is no
     // connection in the queue, then it will block the process. If the socket is labeled (somehow) "no-blcok" then see
@@ -83,6 +84,8 @@ int main() {
     // struct.
     // This is like the "server version of connect". So later if this new socket wants to send message to the client
     // socket, the os would know where to send to.
+
+    // accept a new connection from client: see notes above.
     struct sockaddr_in client_addr;
     int client_addrlen = sizeof(client_addr);
     if ((new_socket = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t*)&client_addrlen)) < 0) {
@@ -90,33 +93,48 @@ int main() {
         close(server_fd);
         exit(EXIT_FAILURE);
     }
-    printf("received client\n");
-
-    // The read call will block and wait for the client to send data. ( in a block TCP socket)
     // This means the server will pause execution at the read call until at least one byte of data is available.
     int bytes_read;
-    int const BUFFER_SIZE = 1048576; // 2Mb: bigger than any single message from client
+    int const BUFFER_SIZE = 1048576 * 2; // 2Mb: bigger than any single message from client
     char buffer[BUFFER_SIZE] = {0};
-    int message_counter = 0;
-    while (1) {
-        bytes_read = read(new_socket, buffer, BUFFER_SIZE);
-        if (bytes_read <= 0){printf("damaged message\n");}
-        // count number of message received; todo: with this buffer method, how to count the number of message received?
-        printf("%d\n", bytes_read);
-        printf("received one message\n");
-        message_counter ++;
-        if (message_counter >= 2){break;}
+
+
+    // each iter of the while is an experiment. The experiment starts with client sendig messages 'A', and ends when the
+    // client send 'z'.
+    while(1) {
+        // The read call will block and wait for the client to send data. ( in a block TCP socket)
+        while (1) {
+
+            // if the client close it's socket, it will send FIN to this new_socket, so recv() would know and return 0.
+            // it will not block the process from this point on.
+            // As long as the clinet socket is still alive, the new_socket will keep listening, recv will keep blocking.
+            // the recv() will always block until new message arrives. As long as the client didn't close, the recv()
+            // will stay there.
+            // how does recv() know a new message arrives? The process was in block mode. when new message arrived, the
+            // OS will wake up this process by unblock it. (From NIC card to OS)2
+            bytes_read = recv(new_socket, buffer, BUFFER_SIZE, 0);
+            if (bytes_read <= 0) {
+                printf("Probably Client socket is closed\n");
+                printf("Closing all sockets in Server...\n");
+                // close both sockets
+                close(new_socket);
+                close(server_fd);
+                return 0;
+            }
+            // check if the last byte of the current buffer is the end: to determine the end of messages
+            if (buffer[bytes_read -1] == END_MESSAGE){break;}
+        }
+
+        // send a message to the client to indicate that process is completed
+        send(new_socket, RECEIVE_MESSAGE, 2,0);
+
+        // close this socket: Becuase the read() will only block the process in the first time, afterwards, even if we
+        // clear the buffer, set all value to 0, it will not block process anymore, it will keep reading from the
+        // buffer (bytes read will be 0, and keep looping).
+        printf("Finished one Trail.\n");
     }
-    printf("received all messages\n");
 
-    // send a message to the client to indicate that process is completed
-    char *complete_message = "all package recieved";
-    send(new_socket, "all package recieved", strlen("all package recieved"),0);
-    printf("sent messages\n");
-
-    // close both sockets
-    close(new_socket);
-    close(server_fd);
-    return 0;
 }
+
+
 

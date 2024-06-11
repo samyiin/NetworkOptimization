@@ -2,17 +2,18 @@
 // Created by Sam Yiin on 03/06/2024.
 //
 
-#include "client.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
+#include <unistd.h>
+
 
 // must be the same as the server
 #define PORT 8080
+#define END_MESSAGE "z" // this is a string, char*, because it's easier this way to send message.
 
 void measure_throughput(int sock, int message_size, int num_messages) {
     // use malloc because we don't know the size of message.
@@ -30,29 +31,34 @@ void measure_throughput(int sock, int message_size, int num_messages) {
         // send function takes a message as a string (message size because message is a ptr), a socket to send to
         // The last parameter is flag: 0 -- No Flag.
         // As documented in connect, here the os knows where to send the message to.
+        // Another note: TCP will ensure that if client sents a message, the server will for sure receive the message.
+        // Also, the TCP ensure that if the client send n messages, it will be delivered in order.
+        // Finally, TCP ensure that the content of message will be the correct (same as what the client send).
+        // Single socket multiple messages.
         send(sock, message, message_size, 0);
     }
-
-    printf("sent message\n");
+    // send the final message so that the server knows:
+    // Notice, message_size = 1 means I am only sending 'z', I am not sending the null terminator of the string.
+    send(sock, END_MESSAGE, 1, 0);
+    // if the print has no \n, then it will not be print duringing running time.
 
     // recieve result from server
-    // todo: the logic here is flawed, you must keep sending until we read respond from the server.
-    int const BUFFER_SIZE = 1048576 * 2;
+    int const BUFFER_SIZE = 1048576 * 2;    // 2Mb buffer
     char buffer[BUFFER_SIZE] = {0};
-    int bytes_read = read(sock, buffer, BUFFER_SIZE);
-    printf("%s", buffer);
-    printf("received message\n");
+    int bytes_read = recv(sock, buffer, BUFFER_SIZE, 0);
+    if (bytes_read <= 0){printf("damaged message\n");}
 
     // end timer
     gettimeofday(&end, NULL);
-    // calculate time
-    double total_time = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec) / 1000000.0;
+    // calculate time: in seconds
+    double const total_second = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec)/1000000.0;
 
     // calculate throughput: afraid of overflow
-    double throughput = ((num_messages * message_size) /1000000) / total_time;
+    double const total_sent_Mb = num_messages * (message_size / 1048576.0);
+    double const throughput = total_sent_Mb / total_second;
+
     // print the throughput
-    printf("%d\t%.2f\tMbytes/sec\n", message_size, throughput);
-    // calculate through put
+    printf("%d\t\t%.2f\t\tMbytes/sec\n", message_size, throughput);
 
     // free allocated memory
     free(message);
@@ -96,19 +102,20 @@ int main(int argc, char const *argv[]) {
         return -1;
     }
 
-    // measure throughput of all of these
-    // int message_sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576};
-    int message_sizes[] = {1};
-    int num_sizes = sizeof(message_sizes) / sizeof(message_sizes[0]);
 
-    for (int i = 0; i < num_sizes; i++) {
-        measure_throughput(client_socket, message_sizes[i], 100); // Send 1000 messages for each size
+    // measure throughput of all of these
+    int const message_sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576};
+    int const num_experiments = sizeof(message_sizes) / sizeof(message_sizes[0]);
+    int const num_messages = 10000;
+
+    for (int i = 0; i < num_experiments; i++) {
+        measure_throughput(client_socket, message_sizes[i], num_messages); // Send 1000 messages for each size
     }
     printf("finish everthing, closing client...\n");
-
 
     // close socket: frees up descriptor, for TCP: send the FIN packet.
     close(client_socket);
     return 0;
 }
+
 
