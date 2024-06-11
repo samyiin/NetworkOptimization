@@ -5,5 +5,5 @@ set(CMAKE_C_STANDARD 11)
 
 add_executable(NetworkOptimization
         Benchmark/server.c
-        Benchmark/client.c
+#        Benchmark/client.c
 )
