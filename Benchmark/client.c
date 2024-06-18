@@ -14,6 +14,7 @@
 // must be the same as the server
 #define PORT 8080
 #define END_MESSAGE "z" // this is a string, char*, because it's easier this way to send message.
+#define BUFFER_SIZE 2*1048576
 
 void measure_throughput(int sock, int message_size, int num_messages) {
     // use malloc because we don't know the size of message.
@@ -43,7 +44,6 @@ void measure_throughput(int sock, int message_size, int num_messages) {
     // if the print has no \n, then it will not be print duringing running time.
 
     // recieve result from server
-    int const BUFFER_SIZE = 1048576 * 2;    // 2Mb buffer
     char buffer[BUFFER_SIZE] = {0};
     int bytes_read = recv(sock, buffer, BUFFER_SIZE, 0);
     if (bytes_read <= 0){printf("damaged message\n");}

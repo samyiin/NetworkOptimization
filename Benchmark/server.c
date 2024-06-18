@@ -7,13 +7,14 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-#define SERVER_IP 132.65.164.103
+#define SERVER_IP "132.65.164.103"
 // "127.0.0.1": loopback address: only listen to clients on this machine
 // INADDR_ANY: 0.0.0.0: to bind to all available interface
-// 132.65.164.103: mlx-stud-03 server's public ip. 
+// "132.65.164.103": mlx-stud-03 server's public ip. 
 #define PORT 8080
 #define END_MESSAGE 'z' // this is a char, not a string as in Client.c, this way it's easier for comparason
 #define RECEIVE_MESSAGE "R"
+#define BUFFER_SIZE 2*1048576
 
 int main() {
     int server_fd, new_socket;
@@ -97,7 +98,6 @@ int main() {
     }
     // This means the server will pause execution at the read call until at least one byte of data is available.
     int bytes_read;
-    int const BUFFER_SIZE = 1048576 * 2; // 2Mb: bigger than any single message from client
     char buffer[BUFFER_SIZE] = {0};
 
 
