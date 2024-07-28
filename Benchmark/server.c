@@ -7,7 +7,8 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-#define SERVER_IP "132.65.164.103"
+// #define SERVER_IP "132.65.164.103"
+#define SERVER_IP "127.0.0.1"
 // "127.0.0.1": loopback address: only listen to clients on this machine
 // INADDR_ANY: 0.0.0.0: to bind to all available interface
 // "132.65.164.103": mlx-stud-03 server's public ip. 
@@ -96,17 +97,16 @@ int main() {
         close(server_fd);
         exit(EXIT_FAILURE);
     }
-    // This means the server will pause execution at the read call until at least one byte of data is available.
-    int bytes_read;
-    char buffer[BUFFER_SIZE] = {0};
-
 
     // each iter of the while is an experiment. The experiment starts with client sendig messages 'A', and ends when the
     // client send 'z'.
     while(1) {
         // The read call will block and wait for the client to send data. ( in a block TCP socket)
-        while (1) {
+        // This means the server will pause execution at the read call until at least one byte of data is available.
+        int bytes_read;
+        char buffer[BUFFER_SIZE] = {0};
 
+        while (1) {
             // if the client close it's socket, it will send FIN to this new_socket, so recv() would know and return 0.
             // it will not block the process from this point on.
             // As long as the clinet socket is still alive, the new_socket will keep listening, recv will keep blocking.
@@ -116,8 +116,8 @@ int main() {
             // OS will wake up this process by unblock it. (From NIC card to OS)2
             bytes_read = recv(new_socket, buffer, BUFFER_SIZE, 0);
             if (bytes_read <= 0) {
-                printf("Probably Client socket is closed\n");
-                printf("Closing all sockets in Server...\n");
+                // printf("Probably Client socket is closed\n");
+                // printf("Closing all sockets in Server...\n");
                 // close both sockets
                 close(new_socket);
                 close(server_fd);
@@ -133,7 +133,7 @@ int main() {
         // close this socket: Becuase the read() will only block the process in the first time, afterwards, even if we
         // clear the buffer, set all value to 0, it will not block process anymore, it will keep reading from the
         // buffer (bytes read will be 0, and keep looping).
-        printf("Finished one Trail.\n");
+        // printf("Finished one Trail.\n");
     }
 
 }
