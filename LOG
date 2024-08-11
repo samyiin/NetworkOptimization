@@ -1,0 +1,5 @@
+2024.08.01
+When explaining the choices we made in this project, we need to consider the following aspects:
+1. Iteration count: Too few? Too high? Convergence detection?
+2. Warmup rounds: What to consider?
+3. Exclusivity: Make sure that our server only listens to our client, not other clients.

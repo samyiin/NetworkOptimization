@@ -50,14 +50,31 @@
 
 #define WC_BATCH (10)
 
+/**
+ * pingpong receive work request id
+ */
 enum {
     PINGPONG_RECV_WRID = 1,
     PINGPONG_SEND_WRID = 2,
 };
 
+
 static int page_size;
 
-
+/**
+ * context
+ * channel
+ * pd               protection domain
+ * mr               memory region
+ * cq               completion queue
+ * qp               queue pair
+ * buf              the pointer to the buffer that holds the data being send
+ * size             size of buffer (since it's a pointer)
+ * rx_depth         depth of receive queue: how many receive work request
+ *                  can be posted in advance.
+ * routs            how many rounds of iteration in the pingpong test
+ * portinfo         information of the port (port state, MTU, other config)
+ */
 struct pingpong_context {
     struct ibv_context		*context;
     struct ibv_comp_channel	*channel;
@@ -72,6 +89,13 @@ struct pingpong_context {
     struct ibv_port_attr	portinfo;
 };
 
+/**
+ * lid local id
+ * qpn queue pair number
+ * psn packet sequence number
+ * gid global id
+ * The gid and lid of the destination node.
+ */
 struct pingpong_dest {
     int lid;
     int qpn;
@@ -91,6 +115,12 @@ enum ibv_mtu pp_mtu_to_enum(int mtu)
     }
 }
 
+/**
+ * store the lid in the attr address, and return attr.lid
+ * @param context the connection status with HCA
+ * @param port the port we want to get the LID for.
+ * @return
+ */
 uint16_t pp_get_local_lid(struct ibv_context *context, int port)
 {
     struct ibv_port_attr attr;
@@ -101,12 +131,24 @@ uint16_t pp_get_local_lid(struct ibv_context *context, int port)
     return attr.lid;
 }
 
+/**
+ * encapsulate ibv_query_port
+ * @param context
+ * @param port
+ * @param attr
+ * @return
+ */
 int pp_get_port_info(struct ibv_context *context, int port,
                      struct ibv_port_attr *attr)
 {
     return ibv_query_port(context, port, attr);
 }
 
+/**
+ * Convert the string representation of gid to ibv_gid typed gid
+ * @param wgid
+ * @param gid
+ */
 void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
 {
     char tmp[9];
@@ -120,6 +162,11 @@ void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
     }
 }
 
+/**
+ * Convert a ibv_gid typed gid to string representation
+ * @param gid
+ * @param wgid
+ */
 void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
 {
     int i;
@@ -128,12 +175,25 @@ void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
         sprintf(&wgid[i * 8], "%08x", htonl(*(uint32_t *)(gid->raw + i * 4)));
 }
 
+/**
+ * Connect to the HCA on the computer (node). Transitioning the state of qp
+ * from INIT to RTR to RTS.
+ *
+ * @param ctx       Connection of our computer to the HCA on the computer
+ * @param port
+ * @param my_psn
+ * @param mtu
+ * @param sl
+ * @param dest      type pingpong_dest, the info of destination
+ * @param sgid_idx
+ * @return
+ */
 static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
                           enum ibv_mtu mtu, int sl,
                           struct pingpong_dest *dest, int sgid_idx)
 {
     struct ibv_qp_attr attr = {
-            .qp_state		= IBV_QPS_RTR,
+            .qp_state		= IBV_QPS_RTR, // set state to "ready to receive"
             .path_mtu		= mtu,
             .dest_qp_num		= dest->qpn,
             .rq_psn			= dest->psn,
@@ -154,6 +214,13 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
         attr.ah_attr.grh.dgid = dest->gid;
         attr.ah_attr.grh.sgid_index = sgid_idx;
     }
+    /**
+     * Set some field of ctx.qp by the given struct attr. We are changing qp.
+     * Only modify fields that are in attr_mask.
+     * I assume these field names are the same for ctx.qp and attr.
+     * Here we first set the qp to RTR state, and change the corresponding
+     * other attributes of qp that relates to the RTR state.
+     */
     if (ibv_modify_qp(ctx->qp, &attr,
             IBV_QP_STATE              |
             IBV_QP_AV                 |
@@ -165,13 +232,21 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
         fprintf(stderr, "Failed to modify QP to RTR\n");
         return 1;
     }
-
-    attr.qp_state	    = IBV_QPS_RTS;
+    /**
+     * Change the qp state and other states again for this qp.
+     * Here we move qp from RTR to RTS state, and add some additional
+     * configuration specific for the RTS state.
+     * Why do we need to first set to RTR and then RTS? The transition
+     * of qp through specific states in particular order is important. It's
+     * written in NVIDIA doc and ChatGPT.
+     */
+    attr.qp_state	    = IBV_QPS_RTS;      // change state to "ready to send"
     attr.timeout	    = 14;
     attr.retry_cnt	    = 7;
     attr.rnr_retry	    = 7;
     attr.sq_psn	    = my_psn;
     attr.max_rd_atomic  = 1;
+
     if (ibv_modify_qp(ctx->qp, &attr,
             IBV_QP_STATE              |
             IBV_QP_TIMEOUT            |
@@ -186,6 +261,19 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
     return 0;
 }
 
+
+/**
+ * This uses websocket (TCP) to first exchange information between the
+ * sender and receiver node.
+ * The information they exchange are pingpong_dest, so basically lid, qpn,
+ * psn and gid.
+ * This function is "client" trying to send its info to "server", and get
+ * the info of server from response of the server.
+ * @param servername
+ * @param port
+ * @param my_dest
+ * @return
+ */
 static struct pingpong_dest *pp_client_exch_dest(const char *servername, int port,
                                                  const struct pingpong_dest *my_dest)
 {
@@ -204,6 +292,15 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     if (asprintf(&service, "%d", port) < 0)
         return NULL;
 
+    /**
+     * Trying to connect to the other node through servername and service.
+     * server name can be a website name or a ip address. service can be
+     * something like http or port number. this function will resolve the
+     * information and give linked list of addrinfo structures: then we can
+     * try to connect to them by order one by one, until we succeed connect to
+     * one of them or we failed.
+     * them
+     */
     n = getaddrinfo(servername, service, &hints, &res);
 
     if (n < 0) {
@@ -230,6 +327,11 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
         return NULL;
     }
 
+    /**
+     * Send local connection to the other node: lid, qpn, gid, etc...
+     * And then receive the connection information of the other node too.
+     * Store the information of the other node
+     */
     gid_to_wire_gid(&my_dest->gid, gid);
     sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
     if (write(sockfd, msg, sizeof msg) != sizeof msg) {
@@ -257,6 +359,23 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     return rem_dest;
 }
 
+/**
+ * This function serves basically the same purpose as above. It's the server
+ * receiving the info from the client and then respond to the client the
+ * server's info.
+ * So here the first part, establishing TCP connection, is "server listen
+ * and accept".
+ * Then the second part, exchange info, is "server first get info from
+ * client, and then send server info to client".
+ * @param ctx
+ * @param ib_port
+ * @param mtu
+ * @param port
+ * @param sl
+ * @param my_dest
+ * @param sgid_idx
+ * @return
+ */
 static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
                                                  int ib_port, enum ibv_mtu mtu,
                                                  int port, int sl,
@@ -357,6 +476,23 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
 
 #include <sys/param.h>
 
+/**
+ * Initialization:
+ * 1. create buffer
+ * 2. connect to local infiniband device
+ * 3. create completion channel
+ * 4. allocate protection domain
+ * 5. register memory region
+ * 6. create CQ, QP, set QP state to be init
+ * @param ib_dev
+ * @param size
+ * @param rx_depth
+ * @param tx_depth
+ * @param port
+ * @param use_event
+ * @param is_server
+ * @return
+ */
 static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
                                             int rx_depth, int tx_depth, int port,
                                             int use_event, int is_server)
@@ -455,7 +591,11 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
 
     return ctx;
 }
-
+/**
+ * Deallocate a lot of "objects" we created.
+ * @param ctx
+ * @return
+ */
 int pp_close_ctx(struct pingpong_context *ctx)
 {
     if (ibv_destroy_qp(ctx->qp)) {
@@ -496,6 +636,15 @@ int pp_close_ctx(struct pingpong_context *ctx)
     return 0;
 }
 
+/**
+ * post receive
+ *  if we cannot post more receive at a time (probably the receive queue is
+ *  full), then we break, and return how many receive work request we posted
+ *  this time. The rest will be posted next time hopefully.
+ * @param ctx
+ * @param n
+ * @return
+ */
 static int pp_post_recv(struct pingpong_context *ctx, int n)
 {
     struct ibv_sge list = {
@@ -503,6 +652,7 @@ static int pp_post_recv(struct pingpong_context *ctx, int n)
             .length = ctx->size,
             .lkey	= ctx->mr->lkey
     };
+    // work request
     struct ibv_recv_wr wr = {
             .wr_id	    = PINGPONG_RECV_WRID,
             .sg_list    = &list,
@@ -514,11 +664,22 @@ static int pp_post_recv(struct pingpong_context *ctx, int n)
 
     for (i = 0; i < n; ++i)
         if (ibv_post_recv(ctx->qp, &wr, &bad_wr))
+
             break;
 
     return i;
 }
 
+/**
+ * Post send
+ *
+ * Why we don't need to worry if send queue is full (like we worried in post
+ * receive)? probably because in post receive we are posting n receive work
+ * request at a time, so we might fail at j << n. Here we are just posting
+ * one send work request, so if we fail we immediately know.
+ * @param ctx
+ * @return
+ */
 static int pp_post_send(struct pingpong_context *ctx)
 {
     struct ibv_sge list = {
@@ -539,13 +700,24 @@ static int pp_post_send(struct pingpong_context *ctx)
     return ibv_post_send(ctx->qp, &wr, &bad_wr);
 }
 
+
+/**
+ * Poll the completion queue and see see how many receive work request and
+ * send work request have been completed. If number of completed send wr +
+ * receive wr is bigger than iters, then finish polling.
+ * @param ctx
+ * @param iters
+ * @return
+ */
 int pp_wait_completions(struct pingpong_context *ctx, int iters)
 {
     int rcnt = 0, scnt = 0;
     while (rcnt + scnt < iters) {
+        // wc: work completion
         struct ibv_wc wc[WC_BATCH];
         int ne, i;
 
+        // poll cq
         do {
             ne = ibv_poll_cq(ctx->cq, WC_BATCH, wc);
             if (ne < 0) {
@@ -555,7 +727,9 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters)
 
         } while (ne < 1);
 
+        // ne: number of completion returned by ibv_poll_cq
         for (i = 0; i < ne; ++i) {
+            // check correctness
             if (wc[i].status != IBV_WC_SUCCESS) {
                 fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
                         ibv_wc_status_str(wc[i].status),
@@ -563,12 +737,39 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters)
                 return 1;
             }
 
+            // processed the item in CQ that we polled: increment scnt and
+            // rcnt counter, so that the main loop continues.
             switch ((int) wc[i].wr_id) {
             case PINGPONG_SEND_WRID:
                 ++scnt;
                 break;
 
+
             case PINGPONG_RECV_WRID:
+                /**
+                 * If number of receive request in in Receive queue is below
+                 * certain threshold (10), it will post another n receive
+                 * requests where n = ctx->rx_depth - ctx->routs
+                 *
+                 * routs: number of receive work requests that are currently
+                 * in the receive queue (technically rwr that are currently
+                 * not completed).
+                 * rx_depth: max number of receive work request that can be
+                 * posted to the receive queue.
+                 *
+                 * 1. decrement ctx->routs by 1: because one of the receive
+                 * work request is completed.
+                 * 2. increment ctx->routs by i that is returned by
+                 * pp_post_recv, i indicates how many new receive wr we
+                 * successfully posted into the receive queue.
+                 *
+                 * If we didn't successfully post all receive request (post
+                 * n RWR into RQ so that RQ is 'full' (according to
+                 * rx_depth), then we raise error.
+                 *
+                 * So basically we will 'fill up' RQ once the number of RWR
+                 * inside is less than 10.
+                 */
                 if (--ctx->routs <= 10) {
                     ctx->routs += pp_post_recv(ctx, ctx->rx_depth - ctx->routs);
                     if (ctx->routs < ctx->rx_depth) {
