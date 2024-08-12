@@ -30,6 +30,7 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <stdio.h>
@@ -45,7 +46,6 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <time.h>
-
 #include <infiniband/verbs.h>
 
 #define WC_BATCH (10)
@@ -176,8 +176,14 @@ void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
 }
 
 /**
- * Connect to the HCA on the computer (node). Transitioning the state of qp
+ * Connect to the remote HCA. Transitioning the state of qp on local device
  * from INIT to RTR to RTS.
+ * Also the info of dest is also provided, so we connect to the destination
+ * through modifying the local device's attribute. More precisely, we are
+ * modifying the qp of the local device: adding the remote info to this
+ * local qp.
+ * Later the ibv_... will handle post send giving the qp have the info of
+ * the remote HCA
  *
  * @param ctx       Connection of our computer to the HCA on the computer
  * @param port
@@ -214,6 +220,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
         attr.ah_attr.grh.dgid = dest->gid;
         attr.ah_attr.grh.sgid_index = sgid_idx;
     }
+
     /**
      * Set some field of ctx.qp by the given struct attr. We are changing qp.
      * Only modify fields that are in attr_mask.
@@ -364,9 +371,12 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
  * receiving the info from the client and then respond to the client the
  * server's info.
  * So here the first part, establishing TCP connection, is "server listen
- * and accept".
+ * and accept". And if there is no connection yet, the accept will block the
+ * process.
+ *
  * Then the second part, exchange info, is "server first get info from
  * client, and then send server info to client".
+ *
  * @param ctx
  * @param ib_port
  * @param mtu
@@ -450,6 +460,10 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
     wire_gid_to_gid(gid, &rem_dest->gid);
 
+    /*
+     * Here we store the remote node info through pp_connect_ctx, whereas if
+     * we are client, we will store the remote info in main.
+     */
     if (pp_connect_ctx(ctx, ib_port, my_dest->psn, mtu, sl, rem_dest, sgid_idx)) {
         fprintf(stderr, "Couldn't connect to remote QP\n");
         free(rem_dest);
@@ -513,6 +527,8 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
         return NULL;
     }
 
+    // if it's server, then the buffer starting point is different, in case
+    // we are testing locally.
     memset(ctx->buf, 0x7b + is_server, size);
 
     ctx->context = ibv_open_device(ib_dev);
@@ -682,6 +698,9 @@ static int pp_post_recv(struct pingpong_context *ctx, int n)
  */
 static int pp_post_send(struct pingpong_context *ctx)
 {
+    /*
+     * The message to send is stored in buffer location
+     */
     struct ibv_sge list = {
             .addr	= (uint64_t)ctx->buf,
             .length = ctx->size,
@@ -749,7 +768,10 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters)
                 /**
                  * If number of receive request in in Receive queue is below
                  * certain threshold (10), it will post another n receive
-                 * requests where n = ctx->rx_depth - ctx->routs
+                 * requests where n = ctx->rx_depth - ctx->routs; basically
+                 * fill up the receive queue.
+                 * Notice, each iteration we are just processing one receive
+                 * . So we increment receive counter by one.
                  *
                  * routs: number of receive work requests that are currently
                  * in the receive queue (technically rwr that are currently
@@ -824,8 +846,8 @@ int main(int argc, char *argv[])
     int                      port = 12345;
     int                      ib_port = 1;
     enum ibv_mtu             mtu = IBV_MTU_2048;
-    int                      rx_depth = 100;
-    int                      tx_depth = 100;
+    int                      rx_depth = 100;    // The length of receive queue
+    int                      tx_depth = 100;    // The length of send queue
     int                      iters = 1000;
     int                      use_event = 0;
     int                      size = 1;
@@ -836,6 +858,9 @@ int main(int argc, char *argv[])
     srand48(getpid() * time(NULL));
 
     while (1) {
+        /**
+         * The first part is to parse command line options
+         */
         int c;
 
         static struct option long_options[] = {
@@ -924,6 +949,13 @@ int main(int argc, char *argv[])
 
     page_size = sysconf(_SC_PAGESIZE);
 
+    /**
+     * This part is trying to see if there is local infiniband devices
+     * Run some checks
+     * If then get the first device that has a device name
+     *
+     * and then Initialize the device
+     */
     dev_list = ibv_get_device_list(NULL);
     if (!dev_list) {
         perror("Failed to get IB devices list");
@@ -952,6 +984,10 @@ int main(int argc, char *argv[])
     if (!ctx)
         return 1;
 
+    /**
+     * "Fill up" the receive queue with receive work requests
+     * If use_event means we will use channels to notify CQ when a task is done
+     */
     ctx->routs = pp_post_recv(ctx, ctx->rx_depth);
     if (ctx->routs < ctx->rx_depth) {
         fprintf(stderr, "Couldn't post receive (%d)\n", ctx->routs);
@@ -964,7 +1000,14 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-
+    /**
+     * Get port info for the local infiniband device
+     * Make sure the local device is a infiniband device and it has a lid
+     * Make sure the local device have a gid
+     * store the lid, gid, pqn, psn to a pingpong_dest struct called my_dest
+     * my_dest is the info for my node, remote_dest is for the node I am
+     * connecting to.
+     */
     if (pp_get_port_info(ctx->context, ib_port, &ctx->portinfo)) {
         fprintf(stderr, "Couldn't get port info\n");
         return 1;
@@ -990,7 +1033,15 @@ int main(int argc, char *argv[])
     printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
            my_dest.lid, my_dest.qpn, my_dest.psn, gid);
 
-
+    /**
+     * If servername is provided, then we are running main as a client, so
+     * we will exchange info with remote host using pp_client_exch_dest,
+     * else we are the server, so we will exchange with pp_server_exch_dest
+     * Notice that pp_server_exch_dest will block the process untill the
+     * client connects to it.
+     *
+     * Then we will print the remote's info
+     */
     if (servername)
         rem_dest = pp_client_exch_dest(servername, port, &my_dest);
     else
@@ -1003,10 +1054,40 @@ int main(int argc, char *argv[])
     printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
            rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
+    /**
+     * If we are client, we will try to establish connection with the remote
+     * If we are server, we already establish connection with remote during
+     * the pp_server_exch_dest above.
+     */
     if (servername)
         if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest, gidx))
             return 1;
 
+    /**
+     * If we are client, we will post send, and then after the
+     * first post send, we will keep posting send for tx_depth times:
+     * basically if the length of send queue is x, we will post x send.
+     * After we posted x send, we will wait for the x send is complete. The
+     * way we achieve this is through setting iter=tx_depth, so after we
+     * posted tx_depth send requests, pp_wait_completions will only return
+     * if all tx_depth send requests are completed.
+     * We will loop until we send n=iter number of messages. Notice, we are
+     * not iterating the above process n=iter times, we are sending n
+     * messages, but once every tx_depth sending, we will wait until all of
+     * them is complete before we continue.
+     *
+     * If we are server, we will just post send to the client. And then we
+     * will wait for completion. We set pp_wait_completions_iter=iter, but
+     * we only send one message, so the rest iter-1 is the completion of
+     * receive (from client).
+     *
+     * Notice: since server will also send one message to client, when
+     * client is waiting for completion, it will get one receive work
+     * request completed in the CQ, that means in that iteration, the client
+     * might post 10 send, but the pp_wait_completions will return as long
+     * as there are 9 sends are completed + 1 receive completed. So this is a
+     * bug.
+     */
     if (servername) {
         int i;
         for (i = 0; i < iters; i++) {
@@ -1014,12 +1095,14 @@ int main(int argc, char *argv[])
                 pp_wait_completions(ctx, tx_depth);
             }
             if (pp_post_send(ctx)) {
-                fprintf(stderr, "Client ouldn't post send\n");
+                fprintf(stderr, "Client couldn't post send\n");
                 return 1;
             }
         }
         printf("Client Done.\n");
     } else {
+        // In our test the server doesn't need to post send. It just needs to
+        // receive
         if (pp_post_send(ctx)) {
             fprintf(stderr, "Server couldn't post send\n");
             return 1;
@@ -1028,6 +1111,9 @@ int main(int argc, char *argv[])
         printf("Server Done.\n");
     }
 
+    /**
+     * Free everything
+     */
     ibv_free_device_list(dev_list);
     free(rem_dest);
     return 0;

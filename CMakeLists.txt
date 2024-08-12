@@ -1,8 +1,12 @@
-cmake_minimum_required(VERSION 3.26)
+cmake_minimum_required(VERSION 3.20)
 project(NetworkOptimization C)
 
-set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD 99)
 
-add_subdirectory(Benchmark)
-add_subdirectory(Optimization)
+add_executable(Benchmark.client Benchmark/client.c)
 
+add_executable(Benchmark.server Benchmark/server.c)
+
+add_executable(ib_pingpong Optimization/bw_template.c)
+
+target_link_libraries(ib_pingpong ibverbs)
