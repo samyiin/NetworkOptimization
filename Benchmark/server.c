@@ -7,8 +7,9 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-// #define SERVER_IP "132.65.164.103"
-#define SERVER_IP "127.0.0.1"
+#define SERVER_IP "132.65.164.101"
+//#define SERVER_IP "127.0.0.1"
+
 // "127.0.0.1": loopback address: only listen to clients on this machine
 // INADDR_ANY: 0.0.0.0: to bind to all available interface
 // "132.65.164.103": mlx-stud-03 server's public ip. 
@@ -68,7 +69,7 @@ int main() {
     // backlog = 3: maximum number of pending connections that can be queued up before the kernel starts to refuse new
     // connection attempts
     // so all the incomming connections will be put into a queue. Later accept will take a connection from the queue.
-    if (listen(server_fd, 3) < 0) {
+    if (listen(server_fd, 1) < 0) {
         perror("listen");
         close(server_fd);
         exit(EXIT_FAILURE);

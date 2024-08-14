@@ -56,12 +56,13 @@ void measure_throughput(int const sock, int const num_experiments, int const war
 	    double const total_second = (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec)/1000000.0;
 
 	    // calculate throughput: afraid of overflow
-	    double const total_sent_Mb = NUM_OF_MESSAGES * (message_size / 1048576.0);
+	    double const total_sent_Mb = NUM_OF_MESSAGES * (message_size * 8 /
+	            1048576.0);
 	    double const throughput = total_sent_Mb / total_second;
 
 	    // print the throughput: In MegaBytes per second
 	    if (!warmup){
-	        printf("%d\t\t%.2f\t\tMbytes/sec\n", message_size, throughput);
+	        printf("%d\t\t%.2f\t\tMbits/sec\n", message_size, throughput);
 	    }
 
 	    // free allocated memory
@@ -147,14 +148,14 @@ int main(int const argc, char const *argv[]) {
         return -1;
     }
 
-	// warm up cycle
-	measure_throughput(client_socket, 21, 1);
+//	// warm up cycle
+//	measure_throughput(client_socket, 21, 1);
 
 	// actual trails
 	measure_throughput(client_socket, 21, 0);
 
-	// warm up (actually not really necessary if we are running two consequtive experiments)
-	measure_latency(client_socket, 1);
+//	// warm up (actually not really necessary if we are running two consequtive experiments)
+//	measure_latency(client_socket, 1);
 
 	// actual trails
 	measure_latency(client_socket, 0);

@@ -116,13 +116,18 @@ enum ibv_mtu pp_mtu_to_enum(int mtu)
 }
 
 /**
- * store the lid in the attr address, and return attr.lid
+ * Get lid of a port of a infiniband device (HCA) represented by context
+ *
  * @param context the connection status with HCA
  * @param port the port we want to get the LID for.
  * @return
  */
 uint16_t pp_get_local_lid(struct ibv_context *context, int port)
 {
+    /*
+     * Create an attr struct, store the lid in the attr address, and return
+     * attr.lid as lid
+     */
     struct ibv_port_attr attr;
 
     if (ibv_query_port(context, port, &attr))
@@ -227,6 +232,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
      * I assume these field names are the same for ctx.qp and attr.
      * Here we first set the qp to RTR state, and change the corresponding
      * other attributes of qp that relates to the RTR state.
+     *
      */
     if (ibv_modify_qp(ctx->qp, &attr,
             IBV_QP_STATE              |
@@ -690,7 +696,8 @@ static int pp_post_recv(struct pingpong_context *ctx, int n)
  * Post send
  *
  * Why we don't need to worry if send queue is full (like we worried in post
- * receive)? probably because in post receive we are posting n receive work
+ * receive, and thus we have a loop-break)?
+ * probably because in post receive we are posting n receive work
  * request at a time, so we might fail at j << n. Here we are just posting
  * one send work request, so if we fail we immediately know.
  * @param ctx
