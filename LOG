@@ -1,5 +1,12 @@
-2024.08.01
 When explaining the choices we made in this project, we need to consider the following aspects:
 1. Iteration count: Too few? Too high? Convergence detection?
+No need too much, enough to converge.
+
 2. Warmup rounds: What to consider?
+No need too much, enough to converge.
+
 3. Exclusivity: Make sure that our server only listens to our client, not other clients.
+This can simply be solved by exchange information before we start.
+
+Find the best combo for the results. (Consider each message size, different distribution of message size might require
+different set of parameters.)

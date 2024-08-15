@@ -126,6 +126,20 @@ int pp_connect_ctx(struct pingpong_context *ctx, int port, int
 
 struct pingpong_dest *pp_client_exch_dest(const char *servername, int port,
         const struct pingpong_dest *my_dest){
+    /*
+     * Trying to connect to the other node through 'servername' and 'service'.
+     *
+     * servername can be a website name or an ip address.
+     * service can be something like 'http' or port number.
+     *
+     * 'getaddrinfo' will resolve the information and give linked list of
+     * addrinfo structures: each addrinfo object is a potential
+     * internet address (ip, port, socket type) of the given servername and
+     * service
+     *
+     * then we can try to connect to them by order one by one, until we succeed
+     * connect to one of them, or we failed all of them.
+     */
     struct addrinfo *res, *t;
     struct addrinfo hints = {
             .ai_family   = AF_INET,         // IPV4
@@ -141,20 +155,6 @@ struct pingpong_dest *pp_client_exch_dest(const char *servername, int port,
     if (asprintf(&service, "%d", port) < 0)
         return NULL;
 
-    /*
-     * Trying to connect to the other node through 'servername' and 'service'.
-     *
-     * servername can be a website name or an ip address.
-     * service can be something like 'http' or port number.
-     *
-     * 'getaddrinfo' will resolve the information and give linked list of
-     * addrinfo structures: each addrinfo object is a potential
-     * internet address (ip, port, socket type) of the given servername and
-     * service
-     *
-     * then we can try to connect to them by order one by one, until we succeed
-     * connect to one of them, or we failed all of them.
-     */
     n = getaddrinfo(servername, service, &hints, &res);
 
     if (n < 0) {
@@ -380,7 +380,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         return NULL;
     }
 
-    // create CQ
+    // create CQ: the size of CQ = rx_depth + tx_depth
     ctx->cq = ibv_create_cq(ctx->context, rx_depth + tx_depth, NULL,
                             ctx->channel, 0);
     if (!ctx->cq) {
@@ -522,7 +522,7 @@ int pp_post_send(struct pingpong_context *ctx){
 int pp_wait_completions(struct pingpong_context *ctx, int iters){
     int rcnt = 0, scnt = 0;
     while (rcnt + scnt < iters) {
-        // wc: work completion
+        // wc: work completion buffer
         struct ibv_wc wc[WC_BATCH];
         int ne, i;
 
@@ -585,9 +585,9 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters){
                      * rx_depth), then we raise error.
                      *
                      * So basically we will 'fill up' RQ once the number of RWR
-                     * inside is less than 10.
+                     * inside is less than REFILL_RWR_THRES.
                      */
-                    if (--ctx->routs <= 10) {
+                    if (--ctx->routs <= REFILL_RWR_THRES) {
                         ctx->routs += pp_post_recv(ctx, ctx->rx_depth - ctx->routs);
                         if (ctx->routs < ctx->rx_depth) {
                             fprintf(stderr,

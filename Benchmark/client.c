@@ -1,6 +1,7 @@
 //
 // Created by Sam Yiin on 03/06/2024.
 //
+#define _GNU_SOURCE             // this is for function "asprintf"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,12 +10,13 @@
 #include <arpa/inet.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <netdb.h>
 
 
 // must be the same as the server
 # define PORT 8080
 # define END_MESSAGE "z" // this is a string, char*, because it's easier this way to send message.
-# define BUFFER_SIZE 2*1048576
+# define BUFFER_SIZE 2 * 1048576
 # define NUM_OF_MESSAGES 10000
 
 void measure_throughput(int const sock, int const num_experiments, int const warmup) {
@@ -31,13 +33,7 @@ void measure_throughput(int const sock, int const num_experiments, int const war
 
 	    // send multiple messages
 	    for (int i = 0; i < NUM_OF_MESSAGES; i++) {
-	        // send function takes a message as a string (message size because message is a ptr), a socket to send to
-	        // The last parameter is flag: 0 -- No Flag.
-	        // As documented in connect, here the os knows where to send the message to.
-	        // Another note: TCP will ensure that if client sents a message, the server will for sure receive the message.
-	        // Also, the TCP ensure that if the client send n messages, it will be delivered in order.
-	        // Finally, TCP ensure that the content of message will be the correct (same as what the client send).
-	        // Single socket multiple messages.
+            // send message
 	        send(sock, message, message_size, 0);
 	    }
 	    // send the final message so that the server knows:
@@ -114,50 +110,64 @@ int main(int const argc, char const *argv[]) {
         printf("Usage: %s <server-ip>\n", argv[0]);
         return -1;
     }
+    // server_ip will be a string of the ip address of the server, the port will be 8080 by default.
+    const char *servername = argv[1];
 
-    // Create client socket: ipv4, TCP
-    int client_socket = socket(AF_INET, SOCK_STREAM, 0);
+    /*
+     * Trying to find the server ip given the server name
+     */
+    struct addrinfo *res, *t;
+    struct addrinfo hints = {
+            .ai_family   = AF_INET,         // IPV4
+            .ai_socktype = SOCK_STREAM      // TCP
+    };
+    char *service;
+    int n;
+    int client_socket = -1;
+    if (asprintf(&service, "%d", PORT) < 0){
+        return -1;
+    }
+
+
+    n = getaddrinfo(servername, service, &hints, &res);
+    if (n < 0) {
+        fprintf(stderr, "%s for %s:%d\n", gai_strerror(n), servername, PORT);
+        free(service);
+        return -1;
+    }
+
+    // t is pointer to current potential server address,
+    // res is the first potential server address
+    for (t = res; t; t = t->ai_next) {
+        // create a client socket that match the style of the potential server
+        client_socket = socket(t->ai_family, t->ai_socktype,
+                                   t->ai_protocol);
+        if (client_socket >= 0) {
+            if (!connect(client_socket, t->ai_addr, t->ai_addrlen))
+                break;
+            close(client_socket);
+            client_socket = -1;
+        }
+    }
+
+    freeaddrinfo(res);
+    free(service);
+
+    // If we didn't manage to connect to any server
     if (client_socket < 0) {
         // todo: close sockets if exit.
         printf("\n Socket creation error \n");
         return -1;
     }
 
-    // not setting ip, only set ipv4, port
-    // server_ip will be a string of the ip address of the server, the port will be 8080 by default.
-    const char *server_ip = argv[1];
-    // build the information of the socket we are connecting to
-    struct sockaddr_in serv_addr;
 
-    // set ipv4, ip, port
-    serv_addr.sin_family = AF_INET;
-    if (inet_pton(AF_INET, server_ip, &serv_addr.sin_addr) <= 0) {
-        printf("\nInvalid address/ Address not supported \n");
-        return -1;
-    }
-    serv_addr.sin_port = htons(PORT);
-
-
-    // Connect to server:
-    // After successfully calling connect, the operating system maintains the connection details for client_socket
-    // So when I later call "send(clent_sever, message, ...), the os would automatically know that I am sending to the
-    // server.
-	// Regarding the ip address and port of the client, it will be recorded in server's side when server accept.
-    if (connect(client_socket, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("\nConnection Failed \n");
-        return -1;
-    }
-
-//	// warm up cycle
-//	measure_throughput(client_socket, 21, 1);
+    // warm up cycle (each warmup cycle takes NUM_OF_MESSAGES round trips)
+	measure_latency(client_socket, 1);
 
 	// actual trails
 	measure_throughput(client_socket, 21, 0);
 
-//	// warm up (actually not really necessary if we are running two consequtive experiments)
-//	measure_latency(client_socket, 1);
-
-	// actual trails
+	// actual trails: if we don't want to print, we can put warmup=0
 	measure_latency(client_socket, 0);
 
     // close socket: frees up descriptor, for TCP: send the FIN packet.

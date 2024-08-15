@@ -7,6 +7,6 @@ add_executable(Benchmark.client Benchmark/client.c)
 
 add_executable(Benchmark.server Benchmark/server.c)
 
-add_executable(ib_pingpong Optimization/bw_template.c)
+add_executable(ibv_pingpong Optimization/ibv_api.c Optimization/ibv_pingpong.c)
 
-target_link_libraries(ib_pingpong ibverbs)
+target_link_libraries(ibv_pingpong ibverbs)

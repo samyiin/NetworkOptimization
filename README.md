@@ -11,7 +11,7 @@ Option 1:
    cd <project_root_directory>
    
    mkdir <cmake-build_directory>
-3. run (Make sure you installed cmake):
+2. run (Make sure you installed cmake):
 
    cmake -S <project_root_directory> -B <cmake-build_directory>
    
@@ -19,7 +19,19 @@ Option 1:
 Option 2:
 Simple use gcc to compile server.c and client.c separately.
 
+Option 3 (Recommended):  
+Use the make file under each sub_directory: run make in terminal.
+
 ### Run
-simple open two terminals and run two executables separately. To test etween two school servers, you just need to log into each server on each terminal, clone the git repo, and the you have the executable. 
- 
-To run on student server: simply 
+simple open two terminals and run two executables separately. To test between two school servers, you just need to log 
+into each server on each terminal, clone the git repo, and then you have the executable. 
+
+And then on one server run  
+   
+   ./server
+
+On the other server run   
+
+   ./client <first_server_name>
+
+Notice that <first_server_name> can be servername like "mlx-stud-0x" or server ip like "132.65.164.10x"

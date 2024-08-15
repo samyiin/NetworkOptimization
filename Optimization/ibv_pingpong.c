@@ -1,5 +1,5 @@
 #include "ibv_api.h"
-# include <unistd.h>
+#include <unistd.h>
 
 /**
  * Calculate throughput for given message size
@@ -56,11 +56,6 @@ int perform_single_experiment(char *servername, int warmup,
      * bug.
      */
     if (servername) {
-        // strat timer
-        struct timeval start_time, end_time;
-        long time_elapse;
-        gettimeofday(&start_time, NULL);
-
         // start the trial
         int i;
         int num_complete = 0;
@@ -79,20 +74,6 @@ int perform_single_experiment(char *servername, int warmup,
         // wait for the last few send_wr to complete
         // + waiting for 1 response from server
         pp_wait_completions(ctx, iters - num_complete + 1);
-
-        // calculate time elapsed
-        gettimeofday(&end_time, NULL);
-        // calculate time: in seconds
-        double const total_second = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_usec - start_time.tv_usec)/1000000.0;
-
-        // calculate throughput: afraid of overflow
-        double const total_sent_Mb = iters * (ctx->size * 8 / 1048576.0);
-        double const throughput = total_sent_Mb / total_second;
-
-        // print the throughput: In MegaBytes per second
-        if (!warmup){
-            printf("%d\t\t%.2f\t\tMbits/sec\n", ctx->size, throughput);
-        }
 
     } else {
         // wait for client to send
@@ -126,15 +107,35 @@ int perform_single_experiment(char *servername, int warmup,
  */
 int throughput_test(char *servername, int warmup,
                   struct pingpong_context *ctx, int tx_depth,
-                   const int *list_message_sizes, int len_list_message_sizes,
                    int iters){
+    int list_message_sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024,
+                                2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
+                                524288, 1048576};
+    int len_list_message_sizes = 21;
     for (int i = 0; i < len_list_message_sizes; i++){
         // set the message size for this trial
         ctx->size = list_message_sizes[i];
+        // strat timer
+        struct timeval start_time, end_time;
+        long time_elapse;
+        gettimeofday(&start_time, NULL);
 
         // perform the trial
         perform_single_experiment(servername,warmup, ctx, tx_depth, iters);
 
+        // calculate time elapsed
+        gettimeofday(&end_time, NULL);
+        // calculate time: in seconds
+        double const total_second = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_usec - start_time.tv_usec)/1000000.0;
+
+        // calculate throughput: afraid of overflow
+        double const total_sent_Mb = iters * (ctx->size * 8 / 1048576.0);
+        double const throughput = total_sent_Mb / total_second;
+
+        // print the throughput: In MegaBytes per second
+        if (!warmup && servername){
+            printf("%d\t\t%.2f\t\tMbits/sec\n", ctx->size, throughput);
+        }
     }
 
 }
@@ -153,8 +154,8 @@ int throughput_test(char *servername, int warmup,
  * @return
  */
 int latency_test(char *servername, int warmup,
-                 struct pingpong_context *ctx, int message_size,
-                         int iters){
+                 struct pingpong_context *ctx, int iters){
+    int message_size = 1024;
     ctx->size = message_size;
 
     // strat timer
@@ -249,15 +250,15 @@ int main(int argc, char *argv[])
     char                    *servername;
     int                      port = 12345;
     int                      ib_port = 1;
-    enum ibv_mtu             mtu = IBV_MTU_1024;
-    int                      rx_depth = 100;    // The length of receive queue
-    int                      tx_depth = 100;    // The length of send queue
-    int                      iters = 5000;      // number of message to send
-    int                      use_event = 0;
-    // poll CQ or not
-    int                      size = 4096;          // default message length
-    int                      buffer_size = 1048576;   // buffer size
-    int                      sl = 0;            // service level
+    enum ibv_mtu             mtu = pp_mtu_to_enum(MTU) ;// mtu
+    int                      rx_depth = RX_DEPTH;   // The length of receive queue
+    int                      tx_depth = TX_DEPTH;    // The length of send queue
+    int                      iters = NUMBER_MESSAGES;      // number of message to send
+    int                      use_event = 0;         // poll CQ or not
+    int                      size = 1;           // default message length
+    int                      buffer_size = BUFFER_SIZE; // buffer size
+    int                      sl = 0;                // service level
+
     // the gid index: if set to -1 then we will set gid to 0, else, we will
     // actually query gid for the local device
     int                      gidx = -1;
@@ -473,22 +474,22 @@ int main(int argc, char *argv[])
             return 1;
 
     /*
-     * perform the ping pong test
+     * warm up
+     * each warmup cycle takes NUM_OF_MESSAGES=iters round trips
      */
-    int warmup = 0;
-    int list_message_sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024,
-                                2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
-                                524288, 1048576};
-    int len_list_message_sizes = 21;
-    throughput_test(servername, warmup,
-                  ctx, tx_depth,
-                  list_message_sizes, len_list_message_sizes, iters);
+    int warmup = 1;
+    latency_test(servername, warmup, ctx, iters);
+
+    /*
+     * throughput test
+     */
+    warmup = 0;
+    throughput_test(servername, warmup, ctx, tx_depth, iters);
 
     /*
      * Latency test
      */
-    int message_size = mtu;
-    latency_test(servername, warmup, ctx, message_size, iters);
+    latency_test(servername, warmup, ctx, iters);
 
     /*
      * Free everything

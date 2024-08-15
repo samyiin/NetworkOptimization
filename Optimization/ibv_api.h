@@ -54,7 +54,58 @@
 #include <time.h>
 #include <infiniband/verbs.h>
 
-#define WC_BATCH (10)
+/*
+ * The larger, the buffer size, then more message the server can receive at
+ * once. (I guess?)
+ */
+#define BUFFER_SIZE 1048576 * 5
+
+/*
+ * No matter how much we set RX to be, there is always a possibility that
+ * the client are sending so fast, the server will not have enough rec_wr to
+ * receive them, Then those send request is queued.
+ * But the higher we set RX_DEPTH, the less likely that will happen. But
+ * when RX_DEPTH is too high, when we send large messages, speed will drop.
+ * probably because it exceeds the buffer size, so the send request is queued?
+ */
+#define TX_DEPTH 1000
+#define RX_DEPTH 1000
+
+/*
+ * The WC_BATCH should also be related to tx_depth and rx_depth.
+ * 1. it doesn't need to exceed the length of CQ = rx_depth + tx_depth
+ * 2. As long as we poll more than the amount of sent messages, it doesn't
+ * make a difference.
+ * 3. If we poll slower than the client send speed, then for the same amount
+ * of message, we will poll more times.
+ * But somehow when this number is high, the speed will drop for large
+ * messages.
+ *
+ */
+#define WC_BATCH (100)
+/*
+ * The REFILL_RWR_THRES is related to how fast the server can process
+ * received messages. Depend on computer.
+ * If it processed slow, then it should refill more often.
+ * Else the server will run out of rec_wr while it is still processing.
+ * But if we refill too often, it also creates overhead.
+ * As long as we refill before the client send more messages, it won't make
+ * a difference if we refill faster.
+ */
+# define REFILL_RWR_THRES 10
+
+/*
+ * Number of iterations is the bigger the better. The problem is just wast
+ * time to perform the test, so we should find a sweet spot
+ */
+#define NUMBER_MESSAGES 5000
+
+/*
+ * mtu will affect how many packets we will send for each message. depends
+ * on how often do we send large message, the mtu will be set differently.
+ * Choices: 256 - 4096 (power of 2)
+ */
+#define MTU 4096
 
 /**
  * pingpong receive work request id
