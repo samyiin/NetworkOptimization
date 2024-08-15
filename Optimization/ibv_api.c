@@ -477,7 +477,7 @@ int pp_post_recv(struct pingpong_context *ctx, int n){
     struct ibv_sge list = {
             .addr	= (uintptr_t) ctx->buf,
             // Here it is how much data you are expected to receive
-            .length = ctx->buf_size,
+            .length = LARGEST_MESSAGE_SIZE,
             .lkey	= ctx->mr->lkey
     };
     // work request

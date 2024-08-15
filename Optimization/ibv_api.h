@@ -53,10 +53,13 @@
 #include <netdb.h>
 #include <time.h>
 #include <infiniband/verbs.h>
-
 /*
- * The larger, the buffer size, then more message the server can receive at
- * once. (I guess?)
+ * The largest message we will send during test is 1048576 bit
+ */
+#define LARGEST_MESSAGE_SIZE 1048576
+/*
+ * The larger BUFFER_SIZE size, then more message the server can receive at
+ * once. (I guess?) I guess here the buffer size is the size of memory region
  */
 #define BUFFER_SIZE 1048576 * 5
 
@@ -140,7 +143,7 @@ struct pingpong_context {
     struct ibv_cq		*cq;
     struct ibv_qp		*qp;
     void			*buf;
-    int             buf_size;
+    int    buf_size;
     int				size;
     int				rx_depth;
     int				routs;
@@ -321,7 +324,7 @@ int pp_close_ctx(struct pingpong_context *ctx);
  *  Notice, since the pp_wait_completions will automatically fill up receive
  *  queue, (and I don't want to change that part), but the message we
  *  receive is not always the same size, so I will have to set the expected
- *  receive message size to buffer size (max size).
+ *  receive message size to LARGEST_MESSAGE_SIZE.
  *
  * @param ctx
  * @param n
