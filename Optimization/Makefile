@@ -3,9 +3,8 @@ CFLAGS = -Wall -g
 LDFLAGS = -libverbs
 
 # source files (.c files)
-SRC = ibv_api.c ibv_pingpong.c
-# header files (.h files)
-HEADER = ibv_api.h
+SRC = bw_template.c
+
 # object files (.o files): For each .c file, their .o file name will be exactly the same except for the extension.
 OBJ = $(SRC: .c=.o)
 
