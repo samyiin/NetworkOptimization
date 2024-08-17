@@ -51,15 +51,13 @@
 #include <netdb.h>
 #include <time.h>
 #include <infiniband/verbs.h>
+
+#include <byteswap.h>
 /*
- * The largest message we will send during test is 1048576 bit
+ * buffer for registering the memory region, need to be big enough for the
+ * largest message. No need to be bigger.
  */
-#define LARGEST_MESSAGE_SIZE 1048576
-/*
- * The larger BUFFER_SIZE size, then more message the server can receive at
- * once. (I guess?) I guess here the buffer size is the size of memory region
- */
-#define BUFFER_SIZE 1048576 * 5
+#define RDMA_WRITE_MR_SIZE 1048576
 
 /*
  * No matter how much we set RX to be, there is always a possibility that
@@ -69,8 +67,8 @@
  * when RX_DEPTH is too high, when we send large messages, speed will drop.
  * probably because it exceeds the buffer size, so the send request is queued?
  */
-#define TX_DEPTH 1000
-#define RX_DEPTH 1000
+#define TX_DEPTH 5000
+#define RX_DEPTH 5000
 
 /*
  * The WC_BATCH should also be related to tx_depth and rx_depth.
@@ -83,7 +81,7 @@
  * messages.
  *
  */
-#define WC_BATCH (50)
+#define WC_BATCH (10)
 /*
  * The REFILL_RWR_THRES is related to how fast the server can process
  * received messages. Depend on computer.
@@ -108,17 +106,34 @@
  */
 #define MTU 4096
 
+/*
+ * This variable will store the max incline data for the qp
+ */
+static uint32_t max_inline;
+
+/**
+ * This two number is for ibv_wr_rdma_write, we (client) need to know the
+ * remote key and remote virtual memory address of the server.
+ */
+struct pdata{
+};
+
 /**
  * pingpong receive work request id
  */
 enum {
     PINGPONG_RECV_WRID = 1,
     PINGPONG_SEND_WRID = 2,
+    PINGPONG_WRITE_WRID = 3,
 };
 
 static int page_size;
 
 /**
+ * Notice the difference between this and original template:
+ * 1. add buf_size: separate buffer size to message size
+ *
+ *
  * context
  * channel
  * pd               protection domain
@@ -126,22 +141,25 @@ static int page_size;
  * cq               completion queue
  * qp               queue pair
  * buf              the pointer to the buffer that holds the data being send
- * buf_size         buffer size
- * size             size of message we are sending/receiving
+ * size             size of control message we are sending/receiving
  * rx_depth         depth of receive queue: how many receive work request
  *                  can be posted in advance.
  * routs            how many rounds of iteration in the pingpong test
  * portinfo         information of the port (port state, MTU, other config)
+ *
+ * Notice: the address where buf is pointing at is the same address for the
+ * control messages.
  */
 struct pingpong_context {
     struct ibv_context		*context;
     struct ibv_comp_channel	*channel;
     struct ibv_pd		*pd;
-    struct ibv_mr		*mr;
+    struct ibv_mr		*mr_control;
+    struct ibv_mr       *mr_rdma_write;
     struct ibv_cq		*cq;
     struct ibv_qp		*qp;
     void			*buf;
-    int    buf_size;
+    void            *mr_rdma_write_start_ptr;
     int				size;
     int				rx_depth;
     int				routs;
@@ -160,6 +178,8 @@ struct pingpong_dest {
     int qpn;
     int psn;
     union ibv_gid gid;
+    uint64_t buf_va;
+    uint32_t buf_rkey;
 };
 
 /**
@@ -249,6 +269,7 @@ void gid_to_wire_gid(const union ibv_gid *gid, char wgid[]){
  * will take the local QP and know where is the remote device.
  *
  * Transitioning the state of local QP on local device from INIT to RTR to RTS.
+ *
  *
  * @param ctx       Connection of our computer to the HCA on the computer
  * @param port      Port of local device we want to connect to
@@ -342,6 +363,10 @@ my_psn, enum ibv_mtu mtu, int sl, struct pingpong_dest *dest, int
  * This function is "client" first send its info to "server", and get
  * the info of server from response of the server.
  * So we assume the local computer that called this function is the client.
+ *
+ * Notice: Here I need to add remote key for mr to exchanged info because we
+ * need RDMA write.
+ *
  * @param servername
  * @param port
  * @param my_dest
@@ -370,11 +395,9 @@ port,
             .ai_socktype = SOCK_STREAM      // TCP
     };
     char *service;
-    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
     int n;
     int sockfd = -1;
     struct pingpong_dest *rem_dest = NULL;
-    char gid[33];
 
     if (asprintf(&service, "%d", port) < 0)
         return NULL;
@@ -411,8 +434,13 @@ port,
      * And then receive the connection information of the other node too.
      * Store the information of the other node.
      */
+    char msg[sizeof "0000:000000:000000:0000000000000000:00000000:00000000000000000000000000000000"];
+    char gid[33];
+
     gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
+    sprintf(msg, "%04x:%06x:%06x:%016lx:%08x:%s", my_dest->lid, my_dest->qpn,
+            my_dest->psn, my_dest->buf_va, my_dest->buf_rkey, gid);
+
     if (write(sockfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
         goto out;
@@ -430,7 +458,8 @@ port,
     if (!rem_dest)
         goto out;
 
-    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
+    sscanf(msg, "%x:%x:%x:%lx:%x:%s", &rem_dest->lid, &rem_dest->qpn,
+           &rem_dest->psn, &rem_dest->buf_va, &rem_dest->buf_rkey, gid);
     wire_gid_to_gid(gid, &rem_dest->gid);
 
     /*
@@ -453,6 +482,9 @@ port,
  * Then the second part, exchange info, is "server first get info from
  * client, and then send server info to client".
  *
+ * Notice: Here I need to add remote key for mr to exchanged info because we
+ * need RDMA write.
+ *
  * @param ctx
  * @param ib_port
  * @param mtu
@@ -474,11 +506,9 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
             .ai_socktype = SOCK_STREAM
     };
     char *service;
-    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
     int n;
     int sockfd = -1, connfd;
     struct pingpong_dest *rem_dest = NULL;
-    char gid[33];
 
     if (asprintf(&service, "%d", port) < 0)
         return NULL;
@@ -520,6 +550,9 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
         fprintf(stderr, "accept() failed\n");
         return NULL;
     }
+    char msg[sizeof "0000:000000:000000:0000000000000000:00000000:00000000000000000000000000000000"];
+    char gid[33];
+
 
     n = read(connfd, msg, sizeof msg);
     if (n != sizeof msg) {
@@ -532,7 +565,9 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     if (!rem_dest)
         goto out;
 
-    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
+    sscanf(msg, "%x:%x:%x:%lx:%x:%s", &rem_dest->lid, &rem_dest->qpn,
+           &rem_dest->psn, &rem_dest->buf_va, &rem_dest->buf_rkey, gid);
+
     wire_gid_to_gid(gid, &rem_dest->gid);
 
     /*
@@ -548,7 +583,8 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
 
 
     gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
+    sprintf(msg, "%04x:%06x:%06x:%016lx:%08x:%s", my_dest->lid, my_dest->qpn,
+            my_dest->psn, my_dest->buf_va, my_dest->buf_rkey, gid);
     if (write(connfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
         free(rem_dest);
@@ -579,9 +615,12 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
  * buffer size to be the same as message size, but here I separate this two
  * values, because I need to send multiple messages of different size.
  *
+ * Notice: added query qp to init the max inline
+ *
  * @param ib_dev
  * @param size          size of message
- * @param buffer_size   buffer size (need to be bigger than message size)
+ * @param rdma_write_mr_size   buffer size (need to be bigger than message
+ * size)
  * @param rx_depth
  *
  * @param tx_depth
@@ -591,7 +630,7 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
  * @return
  */
 static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
-                                     int size, int buffer_size,
+                                     int size, int rdma_write_mr_size,
                                      int rx_depth, int tx_depth, int port,
                                      int use_event, int is_server){
     struct pingpong_context *ctx;
@@ -604,13 +643,13 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
     ctx->rx_depth = rx_depth;
     ctx->routs    = rx_depth;
 
-    // define page size
-    ctx->buf = malloc(roundup(buffer_size, page_size));
+    // allocate size for ctx buffer: both the region for control message and
+    // the region for rdma write
+    ctx->buf = malloc(roundup(size + rdma_write_mr_size, page_size));
     if (!ctx->buf) {
         fprintf(stderr, "Couldn't allocate work buf.\n");
         return NULL;
     }
-    ctx->buf_size = buffer_size;
 
     /*
      * Create buffer
@@ -618,7 +657,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
      * know what this is for, but I know that it is not for testing locally,
      * we still cannot open client and server locally.
      */
-    memset(ctx->buf, 0x7b + is_server, size);
+    memset(ctx->buf, 0x7b + is_server, size + rdma_write_mr_size);
 
     // connect to local device
     ctx->context = ibv_open_device(ib_dev);
@@ -646,12 +685,18 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         return NULL;
     }
 
-    // register mr
-    ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, buffer_size, IBV_ACCESS_LOCAL_WRITE);
-    if (!ctx->mr) {
+    // register mr: this mr is for control messages
+    ctx->mr_control = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_LOCAL_WRITE);
+    if (!ctx->mr_control) {
         fprintf(stderr, "Couldn't register MR\n");
         return NULL;
     }
+
+    // register another mr: this mr is for rdma write
+    ctx->mr_rdma_write_start_ptr = (void *)((char*) ctx->buf + size);
+    ctx->mr_rdma_write = ibv_reg_mr(ctx->pd, ctx->mr_rdma_write_start_ptr,
+                                    rdma_write_mr_size,
+                                    IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE);
 
     // create CQ: the size of CQ = rx_depth + tx_depth
     ctx->cq = ibv_create_cq(ctx->context, rx_depth + tx_depth, NULL,
@@ -672,6 +717,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
                         .max_send_sge = 1,
                         .max_recv_sge = 1
                 },
+                // here we created reliable qp
                 .qp_type = IBV_QPT_RC
         };
 
@@ -704,10 +750,11 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         struct ibv_qp_attr qp_attr;
         struct ibv_qp_init_attr init_attr;
         if (ibv_query_qp(ctx->qp,  &qp_attr, IBV_QP_CAP, &init_attr)){
-            fprintf(stderr, "Failed to query QP\n");
+            fprintf(stderr, "Failed to query QP for max inline\n");
             return NULL;
         }
-        printf("Inline data limit: %u bytes\n", qp_attr.cap.max_inline_data);
+        // store the max inline number
+        max_inline = qp_attr.cap.max_inline_data;
     }
 
     return ctx;
@@ -716,6 +763,8 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
 /**
  * Close a connection
  * Deallocate a lot of "objects" we created (CQ, MR, PD, etc...)
+ *
+ * Notice: add: need to deregister the mr_rdma_write
  * @param ctx
  * @return
  */
@@ -730,8 +779,13 @@ int pp_close_ctx(struct pingpong_context *ctx){
         return 1;
     }
 
-    if (ibv_dereg_mr(ctx->mr)) {
-        fprintf(stderr, "Couldn't deregister MR\n");
+    if (ibv_dereg_mr(ctx->mr_control)) {
+        fprintf(stderr, "Couldn't deregister MR_control\n");
+        return 1;
+    }
+
+    if (ibv_dereg_mr(ctx->mr_rdma_write)) {
+        fprintf(stderr, "Couldn't deregister MR_rdma_write\n");
         return 1;
     }
 
@@ -767,10 +821,9 @@ int pp_close_ctx(struct pingpong_context *ctx){
  *  this function return not exactly n, then the outer scope will raise
  *  error (See implementation of pp_wait_completions)
  *
- *  Notice, since the pp_wait_completions will automatically fill up receive
- *  queue, (and I don't want to change that part), but the message we
- *  receive is not always the same size, so I will have to set the expected
- *  receive message size to LARGEST_MESSAGE_SIZE.
+ * Notice: since post receive will be used for post send, and post send will
+ * only be used for control messages, we will just confine the size of the
+ * expected receive length.
  *
  * @param ctx
  * @param n
@@ -781,8 +834,8 @@ static int pp_post_recv(struct pingpong_context *ctx, int n){
     struct ibv_sge list = {
             .addr	= (uintptr_t) ctx->buf,
             // Here it is how much data you are expected to receive
-            .length = LARGEST_MESSAGE_SIZE,
-            .lkey	= ctx->mr->lkey
+            .length = ctx->size,
+            .lkey	= ctx->mr_control->lkey
     };
     // work request
     struct ibv_recv_wr wr = {
@@ -800,7 +853,6 @@ static int pp_post_recv(struct pingpong_context *ctx, int n){
 
     return i;
 }
-
 /**
  * Post send work request to the send work queue.
  *
@@ -809,6 +861,49 @@ static int pp_post_recv(struct pingpong_context *ctx, int n){
  * probably because in post receive we are posting n receive work
  * request at a time, so we might fail at j << n. Here we are just posting
  * one send work request, so if we fail we immediately know.
+ *
+ * Notice: The post send will only be used for sending control messages.
+ * @param ctx
+ * @return
+ */
+static int pp_post_rdma_write(struct pingpong_context *ctx, struct
+        pingpong_dest *rem_dest, int message_size){
+    /*
+     * The message to send is stored in buffer location
+     */
+    struct ibv_sge list = {
+            .addr	= (uint64_t)ctx->mr_rdma_write_start_ptr,
+            .length = message_size,
+            // lkey: local key for local MR for rdma write
+            .lkey	= ctx->mr_rdma_write->lkey
+    };
+    unsigned int flags = IBV_SEND_SIGNALED;
+    if (message_size <= max_inline){
+        flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+    }
+    struct ibv_send_wr *bad_wr, wr = {
+            .wr_id	    = PINGPONG_SEND_WRID,   //todo: use send for now
+            .sg_list    = &list,
+            .num_sge    = 1,
+            .opcode     = IBV_WR_RDMA_WRITE,
+            .send_flags = flags,
+            .next       = NULL,
+            .wr.rdma.rkey = ntohl(rem_dest->buf_rkey),
+            .wr.rdma.remote_addr = bswap_64(rem_dest->buf_va),
+    };
+
+    return ibv_post_send(ctx->qp, &wr, &bad_wr);
+}
+/**
+ * Post send work request to the send work queue.
+ *
+ * Why we don't need to worry if send queue is full (like we worried in post
+ * receive, and thus we have a loop-break)?
+ * probably because in post receive we are posting n receive work
+ * request at a time, so we might fail at j << n. Here we are just posting
+ * one send work request, so if we fail we immediately know.
+ *
+ * Notice: The post send will only be used for sending control messages.
  * @param ctx
  * @return
  */
@@ -819,15 +914,18 @@ static int pp_post_send(struct pingpong_context *ctx){
     struct ibv_sge list = {
             .addr	= (uint64_t)ctx->buf,
             .length = ctx->size,
-            .lkey	= ctx->mr->lkey     // lkey: local key for local MR
+            .lkey	= ctx->mr_control->lkey     // lkey: local key for local MR
     };
-
+    unsigned int flags = IBV_SEND_SIGNALED;
+    if (ctx->size <= max_inline){
+        flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+    }
     struct ibv_send_wr *bad_wr, wr = {
             .wr_id	    = PINGPONG_SEND_WRID,
             .sg_list    = &list,
             .num_sge    = 1,
             .opcode     = IBV_WR_SEND,
-            .send_flags = IBV_SEND_SIGNALED,
+            .send_flags = flags,
             .next       = NULL
     };
 
@@ -846,6 +944,11 @@ static int pp_post_send(struct pingpong_context *ctx){
  *
  * We made a change to the template: here we will wait for exactly iters
  * number of completion.
+ *
+ * Notice: since we will use post_send and post_receive just for control
+ * messages, technically we don't need to fill up the receive queue all the
+ * time. But for sake of simplicity I will keep this design.
+ *
  * @param ctx
  * @param iters
  * @return
@@ -970,7 +1073,8 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters){
  */
 int perform_single_experiment(char *servername, int warmup,
                               struct pingpong_context *ctx, int tx_depth,
-                              int iters){
+                              int iters,
+                              struct pingpong_dest *rem_dest, int message_size){
     /*
      * If we are client,
      * we will post send, we are posting n send work requests in total.
@@ -1001,27 +1105,35 @@ int perform_single_experiment(char *servername, int warmup,
         // start the trial
         int i;
         int num_complete = 0;
-        for (i = 0; i < iters; i++) {
+        for (i = 0; i < iters ; i++) {
             // wait for the current tx_depth send_wr to complete before we
             // continue.
             if ((i != 0) && (i % tx_depth == 0)) {
                 pp_wait_completions(ctx, tx_depth);
                 num_complete += tx_depth;
             }
-            if (pp_post_send(ctx)) {
-                fprintf(stderr, "Client couldn't post send\n");
+
+            if (pp_post_rdma_write(ctx, rem_dest, message_size)){
+                fprintf(stderr, "Client couldn't post RDMA write\n");
                 return 1;
             }
         }
-        // wait for the last few send_wr to complete
-        // + waiting for 1 response from server
-        pp_wait_completions(ctx, iters - num_complete + 1);
+
+
+        // tell the server that the writing is done.
+        if (pp_post_send(ctx)) {
+            fprintf(stderr, "Client couldn't post send\n");
+            return 1;
+        }
+        // wait for the send to complete, and wait for the server to answer
+        // with one control message: complete.
+        pp_wait_completions(ctx, iters - num_complete + 2);
 
     } else {
-        // wait for client to send
-        pp_wait_completions(ctx, iters);
+        // wait for client to send the finish message.
+        pp_wait_completions(ctx, 1);
 
-        // send a response to client
+        // send a response to client (So that client can stop counting time.
         if (pp_post_send(ctx)) {
             fprintf(stderr, "Server couldn't post send\n");
             return 1;
@@ -1049,21 +1161,23 @@ int perform_single_experiment(char *servername, int warmup,
  */
 int throughput_test(char *servername, int warmup,
                     struct pingpong_context *ctx, int tx_depth,
-                    int iters){
+                    int iters, struct pingpong_dest *rem_dest){
     int list_message_sizes[] = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024,
                                 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
                                 524288, 1048576};
     int len_list_message_sizes = 21;
     for (int i = 0; i < len_list_message_sizes; i++){
         // set the message size for this trial
-        ctx->size = list_message_sizes[i];
+        int message_size = list_message_sizes[i];
+
         // strat timer
         struct timeval start_time, end_time;
         long time_elapse;
         gettimeofday(&start_time, NULL);
 
         // perform the trial
-        perform_single_experiment(servername,warmup, ctx, tx_depth, iters);
+        perform_single_experiment(servername,warmup, ctx, tx_depth, iters,
+                                  rem_dest, message_size);
 
         // calculate time elapsed
         gettimeofday(&end_time, NULL);
@@ -1071,12 +1185,12 @@ int throughput_test(char *servername, int warmup,
         double const total_second = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_usec - start_time.tv_usec)/1000000.0;
 
         // calculate throughput: afraid of overflow
-        double const total_sent_Mb = iters * (ctx->size * 8 / 1048576.0);
+        double const total_sent_Mb = iters * (message_size * 8 / 1048576.0);
         double const throughput = total_sent_Mb / total_second;
 
         // print the throughput: In MegaBytes per second
         if (!warmup && servername){
-            printf("%d\t\t%.2f\t\tMbits/sec\n", ctx->size, throughput);
+            printf("%d\t\t%.2f\t\tMbits/sec\n", message_size, throughput);
         }
     }
 
@@ -1097,9 +1211,6 @@ int throughput_test(char *servername, int warmup,
  */
 int latency_test(char *servername, int warmup,
                  struct pingpong_context *ctx, int iters){
-    int message_size = 1024;
-    ctx->size = message_size;
-
     // strat timer
     struct timeval start_time, end_time;
     long time_elapse;
@@ -1197,8 +1308,10 @@ int main(int argc, char *argv[])
     int                      tx_depth = TX_DEPTH;    // The length of send queue
     int                      iters = NUMBER_MESSAGES;      // number of message to send
     int                      use_event = 0;         // poll CQ or not
-    int                      size = 1;           // default message length
-    int                      buffer_size = BUFFER_SIZE; // buffer size
+    int                      size = 1;           // control message length
+    int                      rdma_write_mr_size = RDMA_WRITE_MR_SIZE; //
+    // buffer
+    // size
     int                      sl = 0;                // service level
 
     // the gid index: if set to -1 then we will set gid to 0, else, we will
@@ -1329,7 +1442,9 @@ int main(int argc, char *argv[])
         }
     }
 
-    ctx = pp_init_ctx(ib_dev, size, buffer_size, rx_depth, tx_depth, ib_port, use_event,
+    ctx = pp_init_ctx(ib_dev, size, rdma_write_mr_size, rx_depth, tx_depth,
+                      ib_port,
+                      use_event,
                       !servername);
     if (!ctx)
         return 1;
@@ -1380,8 +1495,10 @@ int main(int argc, char *argv[])
     my_dest.qpn = ctx->qp->qp_num;
     my_dest.psn = lrand48() & 0xffffff;
     inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
-//    printf("  local address:  LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-//           my_dest.lid, my_dest.qpn, my_dest.psn, gid);
+
+    // get the rkey and virtual mr address of myself
+    my_dest.buf_va = bswap_64((uintptr_t)ctx->mr_rdma_write_start_ptr);
+    my_dest.buf_rkey = htonl(ctx->mr_rdma_write->rkey);
 
     /*
      * If servername is provided, then we are running main as a client, so
@@ -1401,8 +1518,6 @@ int main(int argc, char *argv[])
         return 1;
 
     inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-//    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-//           rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
 
     /*
      * If we are client, we will try to establish connection with the remote
@@ -1420,18 +1535,18 @@ int main(int argc, char *argv[])
      * each warmup cycle takes NUM_OF_MESSAGES=iters round trips
      */
     int warmup = 1;
-    latency_test(servername, warmup, ctx, iters);
+//    latency_test(servername, warmup, ctx, iters);
 
     /*
      * throughput test
      */
     warmup = 0;
-    throughput_test(servername, warmup, ctx, tx_depth, iters);
+    throughput_test(servername, warmup, ctx, tx_depth, iters, rem_dest);
 
-    /*
-     * Latency test
-     */
-    latency_test(servername, warmup, ctx, iters);
+//    /*
+//     * Latency test
+//     */
+//    latency_test(servername, warmup, ctx, iters);
 
     /*
      * Free everything
