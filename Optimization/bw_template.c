@@ -1535,7 +1535,7 @@ int main(int argc, char *argv[])
      * each warmup cycle takes NUM_OF_MESSAGES=iters round trips
      */
     int warmup = 1;
-//    latency_test(servername, warmup, ctx, iters);
+    latency_test(servername, warmup, ctx, iters);
 
     /*
      * throughput test
