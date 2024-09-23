@@ -57,7 +57,7 @@
  * buffer for registering the memory region, need to be big enough for the
  * largest message. No need to be bigger.
  */
-#define RDMA_WRITE_MR_SIZE 1048576
+#define MR_RDMA_WRITE_SIZE 1048576
 
 /*
  * No matter how much we set RX to be, there is always a possibility that
@@ -109,14 +109,8 @@
 /*
  * This variable will store the max incline data for the qp
  */
-static uint32_t max_inline;
+uint32_t max_inline;
 
-/**
- * This two number is for ibv_wr_rdma_write, we (client) need to know the
- * remote key and remote virtual memory address of the server.
- */
-struct pdata{
-};
 
 /**
  * pingpong receive work request id
@@ -651,12 +645,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         return NULL;
     }
 
-    /*
-     * Create buffer
-     * if it's server, then the buffer starting point is different, I don't
-     * know what this is for, but I know that it is not for testing locally,
-     * we still cannot open client and server locally.
-     */
+    // fill up the buffer region with value (if it's server then 124, else 123)
     memset(ctx->buf, 0x7b + is_server, size + rdma_write_mr_size);
 
     // connect to local device
@@ -768,7 +757,7 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
  * @param ctx
  * @return
  */
-int pp_close_ctx(struct pingpong_context *ctx){
+static int pp_close_ctx(struct pingpong_context *ctx){
     if (ibv_destroy_qp(ctx->qp)) {
         fprintf(stderr, "Couldn't destroy QP\n");
         return 1;
@@ -1309,9 +1298,8 @@ int main(int argc, char *argv[])
     int                      iters = NUMBER_MESSAGES;      // number of message to send
     int                      use_event = 0;         // poll CQ or not
     int                      size = 1;           // control message length
-    int                      rdma_write_mr_size = RDMA_WRITE_MR_SIZE; //
-    // buffer
-    // size
+    // buffer size for RDMA Write
+    int                      rdma_write_mr_size = MR_RDMA_WRITE_SIZE;
     int                      sl = 0;                // service level
 
     // the gid index: if set to -1 then we will set gid to 0, else, we will
@@ -1340,6 +1328,8 @@ int main(int argc, char *argv[])
                 { .name = "gid-idx",  .has_arg = 1, .val = 'g' },
                 { 0 }
         };
+
+
 
         c = getopt_long(argc, argv, "p:d:i:s:m:r:n:l:eg:", long_options, NULL);
         if (c == -1)
@@ -1472,6 +1462,8 @@ int main(int argc, char *argv[])
      * store the lid, gid, pqn, psn to a pingpong_dest struct called my_dest
      * my_dest is the info for my node, remote_dest is for the node I am
      * connecting to.
+     * Also, get the rkey and virtual mr address of myself (server), later
+     * send it to the client so that the client can directly write to my MR
      */
     if (pp_get_port_info(ctx->context, ib_port, &ctx->portinfo)) {
         fprintf(stderr, "Couldn't get port info\n");
@@ -1496,7 +1488,7 @@ int main(int argc, char *argv[])
     my_dest.psn = lrand48() & 0xffffff;
     inet_ntop(AF_INET6, &my_dest.gid, gid, sizeof gid);
 
-    // get the rkey and virtual mr address of myself
+    // The remote memory region and remote key
     my_dest.buf_va = bswap_64((uintptr_t)ctx->mr_rdma_write_start_ptr);
     my_dest.buf_rkey = htonl(ctx->mr_rdma_write->rkey);
 
@@ -1551,6 +1543,7 @@ int main(int argc, char *argv[])
     /*
      * Free everything
      */
+    pp_close_ctx(ctx);
     ibv_free_device_list(dev_list);
     free(rem_dest);
     return 0;

@@ -560,6 +560,7 @@ void process_server_packet(struct pingpong_context *ctx){
                     response_size = (unsigned int) ((void *) packet->packet_union.eager_get_answer.value - (void *) packet + length_of_val);
                     curr->num_client_gets--;
                 }
+
                 else{
                     /// RENDEZVOUS PROTOCOL
                     memory_reg = ibv_reg_mr(ctx->pd, curr->value, length_of_val, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ);

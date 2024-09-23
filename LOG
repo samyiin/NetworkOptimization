@@ -10,3 +10,17 @@ This can simply be solved by exchange information before we start.
 
 Find the best combo for the results. (Consider each message size, different distribution of message size might require
 different set of parameters.)
+
+How many times of copy? See group
+
+max_inline? Get it from QP, and then if message size < max_inline, we will send it by in line
+
+need to look into what is a channel in ibv_create_comp_channel, and it's something relates to Host Channel Adapter.
+And also, I understand what is a QP, but in which physical existence is it?
+Also the "use_event" in completion queue
+
+Need to look at what is service level (sl)
+
+Also, for multi client, maybe worth check out protection domain
+
+look into port_info
