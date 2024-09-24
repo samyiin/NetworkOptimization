@@ -27,38 +27,26 @@
 
 
 
-/*
- * The WC_BATCH should also be related to tx_depth and rx_depth.
- * 1. it doesn't need to exceed the length of CQ = rx_depth + tx_depth
- * 2. As long as we poll more than the amount of sent messages, it doesn't
- * make a difference.
- * 3. If we poll slower than the client send speed, then for the same amount
- * of message, we will poll more times.
- * But somehow when this number is high, the speed will drop for large
- * messages.
+/**
+ * The WC_BATCH: how many work complete do we poll from cq in one ibv_poll_cq
  *
  */
 #define WC_BATCH (10)
-/*
- * The REFILL_RWR_THRES is related to how fast the server can process
- * received messages. Depend on computer.
- * If it processed slow, then it should refill more often.
- * Else the server will run out of rec_wr while it is still processing.
- * But if we refill too often, it also creates overhead.
- * As long as we refill before the client send more messages, it won't make
- * a difference if we refill faster.
+
+/**
+ * The REFILL_RWR_THRES: when receive queue have less receive work request,
+ * we will refill the receive queue.
  */
 # define REFILL_RWR_THRES 10
 
-/*
- * Number of iterations is the bigger the better. The problem is just wast
- * time to perform the test, so we should find a sweet spot
+/**
+ * This is for throughput test
  */
 #define NUMBER_MESSAGES 5000
 
-/*
- * mtu will affect how many packets we will send for each message. depends
- * on how often do we send large message, the mtu will be set differently.
+/**
+ * mtu depends on how often do we send large message, the mtu will be set
+ * differently.
  * Choices: 256 - 4096 (power of 2)
  */
 #define MTU 4096
@@ -77,16 +65,18 @@ extern uint32_t max_inline;
 extern int page_size;
 
 /**
- * pingpong receive work request id
- *
- * What's Different From Template?
- * Added PINGPONG_WRITE_WRID
+ * Work request id, in our exercise not really important.....
  */
 enum {
     PINGPONG_SEND_WRID = 0,
     PINGPONG_WRITE_WRID = 1,
 };
 
+/**
+ * This enum is the status of receive MRs. If we used them to post receive,
+ * then it will IN_RECEIVE_QUEUE, after the receive wr is completed, this mr
+ * will be FREE again
+ */
 enum MRStatus{
     FREE = 0,
     IN_RECEIVE_QUEUE = 1,
@@ -196,7 +186,7 @@ int pp_post_rdma_write(struct pingpong_context *ctx);
 
 int pp_post_send(struct pingpong_context *ctx);
 
-int pp_wait_completions(struct pingpong_context *ctx, int n_complete);
+int pp_wait_n_completions(struct pingpong_context *ctx, int n_complete);
 
-
+struct ibv_wc *pp_wait_next_complete(struct pingpong_context *ctx);
 #endif //NETWORKOPTIMIZATION_IB_FUNCTIONS_H

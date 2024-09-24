@@ -813,19 +813,19 @@ int pp_post_send(struct pingpong_context *ctx) {
  * receive work requests are lower than REFILL_RWR_THRES, we will fill up the
  * receive queue with receive work requests.
  *
+ * This function is used for simply waiting for n work requests to complete.
+ * We can not do anything to the completed work request.
+ *
  * ===========================================================================
  * We made a change to the template: here we will wait for exactly n_complete
  * number of completion.
  *
- * Notice: since we will use post_send and post_receive just for control
- * messages, technically we don't need to fill up the receive queue all the
- * time. But for sake of simplicity I will keep this design.
  *
  * @param ctx
  * @param n_complete
  * @return
  */
-int pp_wait_completions(struct pingpong_context *ctx, int n_complete) {
+int pp_wait_n_completions(struct pingpong_context *ctx, int n_complete) {
     int rcnt = 0, scnt = 0;
     while (rcnt + scnt < n_complete) {
         /// poll cq
@@ -833,8 +833,7 @@ int pp_wait_completions(struct pingpong_context *ctx, int n_complete) {
         struct ibv_wc wc[WC_BATCH];
         int ne, i;
         do {
-            // poll at most WC_BATCH from the CQ. But, we make sure we will
-            // poll exactly "n_complete" number of entries from the CQ.
+            // poll at most WC_BATCH from the CQ.
             int num_poll = (WC_BATCH > n_complete - rcnt - scnt) ? n_complete - rcnt -
                                                                    scnt : WC_BATCH;
             ne = ibv_poll_cq(ctx->cq, num_poll, wc);
@@ -895,3 +894,34 @@ int pp_wait_completions(struct pingpong_context *ctx, int n_complete) {
     }
     return 0;
 }
+
+/**
+ * This function will poll one work complete from cq and check if it's
+ * successful, then return it to the user.
+ * @param ctx
+ * @return
+ */
+struct ibv_wc *pp_wait_next_complete(struct pingpong_context *ctx){
+    /// poll one work complete from cq
+    struct ibv_wc *wc = malloc(sizeof (struct ibv_wc));
+    int ne;
+    do {
+        // poll 1 request from the CQ.
+        int num_poll = 1;
+        ne = ibv_poll_cq(ctx->cq, num_poll, wc);
+        if (ne < 0) {
+            fprintf(stderr, "poll CQ failed %d\n", ne);
+            return NULL;
+        }
+
+    } while (ne == 0);
+    /// Check if the work complete is successful
+    if (wc->status != IBV_WC_SUCCESS) {
+        fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+                ibv_wc_status_str(wc->status),
+                wc->status, (int) wc->wr_id);
+        return NULL;
+    }
+    return wc;
+}
+

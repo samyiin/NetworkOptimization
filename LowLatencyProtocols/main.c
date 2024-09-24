@@ -33,12 +33,12 @@ int latency_test(char *servername, int warmup,
             }
 
             // wait for response from server + send work complete
-            pp_wait_completions(ctx, 2);
+            pp_wait_n_completions(ctx, 2);
 
         }else{
             if (i == 0){
                 // wait for first message from client
-                pp_wait_completions(ctx, 1);
+                pp_wait_n_completions(ctx, 1);
             }
 
 
@@ -49,10 +49,10 @@ int latency_test(char *servername, int warmup,
 
             if (i == iters - 1){
                 // last time there will not be next message from client
-                pp_wait_completions(ctx, 1);
+                pp_wait_n_completions(ctx, 1);
             }else{
                 // wait for send wr complete + next message from client
-                pp_wait_completions(ctx, 2);
+                pp_wait_n_completions(ctx, 2);
             }
         }
     }
@@ -68,6 +68,24 @@ int latency_test(char *servername, int warmup,
     // print the latency
     if (!warmup && servername){
         printf("Latency:\t\t%.4f\tmilliseconds\n", latency);
+    }
+    return 0;
+}
+
+
+int perform_kv_set_test(const char *servername, void *kv_handle){
+    if (!servername){
+        run_server(kv_handle);
+    }else{
+        char *key1 = "key1", *value1 = "value1";
+        kv_set(kv_handle, key1, value1);
+        char *key2 = "key2", *value2 = "value2";
+        kv_set(kv_handle, key2, value2);
+        char *key3 = "key3", *value3 = "value3";
+        kv_set(kv_handle, key3, value3);
+
+        value1 = "new value!!!";
+        kv_set(kv_handle, key1, value1);
     }
     return 0;
 }
@@ -103,14 +121,16 @@ int main(int argc, char *argv[])
     /// Create an empty pointer, kv_open will add stuff to it
     KVHandle *kv_handle;
     if (kv_open(servername, (void*) &kv_handle) == 1){
-        printf("hello!");
+        printf("in main: kv_open failed!");
         return -1;
     };
 
-
     /// for test
-    int iters = 50;
+    int iters = 5000;
     latency_test(servername, 0, kv_handle->ctx, iters);
+
+    /// test kv set
+    perform_kv_set_test(servername, kv_handle);
 
     /// free everything
     kv_close(kv_handle);

@@ -20,6 +20,7 @@
 typedef struct KeyValueAddressPair{
     char* key_address;
     char* value_address;
+    size_t value_size;
 }KeyValueAddressPair;
 
 /**
@@ -56,22 +57,30 @@ KeyValueAddressArray *initialize_KeyValueAddressArray(int initial_size){
  */
 void insert_array(KeyValueAddressArray *my_array, KeyValueAddressPair
 *my_entry){
-    // if the key is already in the array, then we update the key
+    /// Check if key already exist in array
     for (int i = 0; i < my_array->used_length; i++){
         char *my_key = my_array->head[i].key_address;
         char *insert_key = my_entry->key_address;
         if (strcmp(my_key, insert_key) ==0){
+            char *original_value_address = my_array->head[i].value_address;
+            // if the key is already in the array, then we update the key
             my_array->head[i].value_address = my_entry->value_address;
+            my_array->head[i].value_size = my_entry->value_size;
+            // free the original value address
+            free(original_value_address);
+            // free the new key address
+            free(my_entry->key_address);
             return;
         }
     }
+    /// If exceeds limit, then double the array length
     if (my_array->used_length == my_array->total_length){
         my_array->total_length *= 2;
         // ignore the case if realloc fails: if it fails then mem leak
         my_array->head = realloc(my_array->head, sizeof(KeyValueAddressPair)
         * my_array->total_length);
     }
-    // This will copy addresses to my_array->head
+    /// Insert the entry to my_array
     my_array->head[my_array->used_length] = *my_entry;
     my_array->used_length += 1;
 }
@@ -85,6 +94,8 @@ void insert_array(KeyValueAddressArray *my_array, KeyValueAddressPair
 void free_array(KeyValueAddressArray *my_array){
     for (int i = 0; i < my_array->used_length; i++){
         /// free each malloc key and value address
+        free(my_array->head[i].key_address);
+        free(my_array->head[i].value_address);
     }
     free(my_array->head);
     free(my_array);
@@ -92,25 +103,38 @@ void free_array(KeyValueAddressArray *my_array){
 
 
 /**
- * Assign the pointer to string the address of the string
+ * assign the address of corresponding kv_pair to the given pointer
  * @param my_array
  * @param key
  * @param value_ptr where to strong the head ptr of value
  * @return
  */
-void get_value_ptr(KeyValueAddressArray *my_array, char *key, char
-**value_ptr){
+KeyValueAddressPair *get_KeyValueAddressPair(KeyValueAddressArray *my_array,
+                                             char *key){
     for (int i = 0; i < my_array->used_length; i++){
         char *my_key = my_array->head[i].key_address;
         if (strcmp(my_key, key) ==0){
-            *value_ptr = my_array->head[i].value_address;
-            return;
+            return my_array->head + i;
         }
     }
     // if not found assign NULL
-    *value_ptr = NULL;
+    return NULL;
 }
 
+/**
+ * For debug, to see the internal state of the array
+ * @param my_array
+ */
+void print_dynamic_array(KeyValueAddressArray *my_array){
+    printf("=============================================================\n");
+    for (int i = 0; i < my_array->used_length; i++) {
+        char *my_key = my_array->head[i].key_address;
+        char *my_value = my_array->head[i].value_address;
+        size_t value_size = my_array->head[i].value_size;
+        printf("Entry: %d, Key: %s, value %s, value size: %zu\n", i, my_key,
+               my_value, value_size);
+    }
+}
 //int main(){
 //    KeyValueAddressPair pair1, pair2, pair3;
 //    char *key1 = "key1", *key2 = "key2", *key3 = "key3";

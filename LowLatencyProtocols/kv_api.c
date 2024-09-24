@@ -191,22 +191,26 @@ int kv_open(char *servername, void **kv_handle){
  */
 int kv_set(void *kv_handle, const char *key, const char *value){
     KVHandle *ptr_kv_handle = (KVHandle *) kv_handle;
-
     if (strlen(key) + strlen(value) + 2 <= CONTROL_MESSAGE_BUFFER_SIZE){
         /// send a message to the server containing key and value
         /// concatenate the mr_control_start_pointer as a kv_addr_pair pointer
         ControlMessage *key_value_pair = (ControlMessage *)
                 ptr_kv_handle->ctx->mr_send_start_ptr;
         /// We will just mem_copy to a registered memory region: mr_control
-        key_value_pair->protocol = EAGER;
-        key_value_pair->operation = KV_SET;
+        key_value_pair->operation = EAGER_KV_SET;
         strcpy(key_value_pair->buf, key);
         strcpy(key_value_pair->buf + strlen(key) + 1, value);
         /// send the message
         pp_post_send(ptr_kv_handle->ctx);
-        /// Wait for this send to finish (it's secure so need need confirm)
-        pp_wait_completions(ptr_kv_handle->ctx, 1);
-        printf("Client: kv_set complete!");
+        /// Wait for this send to finish
+        struct ibv_wc *next_complete_wc = pp_wait_next_complete(ptr_kv_handle->ctx);
+        if (next_complete_wc->opcode != IBV_WC_SEND){
+            // do something and skip the round
+            fprintf(stderr, "kv_set: EAGER something went wrong\n");
+            return 1;
+        }
+        /// (probably need one confirm from server)
+        printf("Client: kv_set complete!\n");
     }else{
 //        /// It's more expensive to perform mem_copy than register memory.
 //        /// So we will register the address of the value as a memory region.
@@ -225,6 +229,80 @@ int kv_set(void *kv_handle, const char *key, const char *value){
     return 0;
 }
 
+/**
+ * This function get the value from the server side.
+ *
+ * 1. client send key
+ * 2. server send either EAGER response or RENDEZVOUS response
+ *
+ * @param kv_handle
+ * @param key
+ * @param var
+ * @return
+ */
+int kv_get(void *kv_handle, const char *key, char **var){
+    /// First send a message containing the key
+    KVHandle *ptr_kv_handle = (KVHandle *) kv_handle;
+    ControlMessage *key_value_pair = (ControlMessage *)
+            ptr_kv_handle->ctx->mr_send_start_ptr;
+    /// We will just mem_copy to a registered memory region: mr_control
+    key_value_pair->operation = CLIENT_KV_GET;
+    strcpy(key_value_pair->buf, key);
+    /// send the message
+    pp_post_send(ptr_kv_handle->ctx);
+    /// Wait for send wc and server response
+    // todo: this will need to be optimized, new wait for complete
+    struct ibv_wc *new_2_complete[2];
+    new_2_complete[0] = pp_wait_next_complete(ptr_kv_handle->ctx);
+    new_2_complete[1] = pp_wait_next_complete(ptr_kv_handle->ctx);
+    // Check the type of the two wc and get the response wc
+    int contains_send_wc = 0, contains_receive_wc=0;
+    struct ibv_wc *response_wc;
+    for (int i = 0; i < 2; i++){
+        if (new_2_complete[i]->opcode == IBV_WC_SEND){
+            contains_send_wc = 1;
+        }
+        if (new_2_complete[i]->opcode == IBV_WC_RECV){
+            contains_receive_wc = 1;
+            response_wc = new_2_complete[i];
+        }
+    }
+    if (contains_send_wc + contains_receive_wc != 2){
+        // do something and skip the round
+        fprintf(stderr, "kv_get: CLIENT_KV_GET something went wrong\n");
+        return 1;
+    }
+    /// Now we get the information from response_wc
+    int mr_id = (int) response_wc->wr_id;
+    // make it a pointer because we need to change it later
+    struct MRInfo *ptr_mr_receive = ptr_kv_handle->ctx->array_mr_receive_info +
+                                    mr_id;
+    // cast the memory region in form of struct Control message
+    ControlMessage *ptr_control_message = (ControlMessage *)
+            ptr_mr_receive->mr_start_ptr;
+
+    /// Handle the response
+    if (ptr_control_message->operation == SERVER_KV_GET_EAGER){
+        // According to eager protocol, the value should be inside the buffer.
+        char *buffer_value_address = ptr_control_message->buf;
+        size_t value_length = strlen(buffer_value_address) + 1;
+        char *local_value_address = malloc(value_length);
+        // mem copy to where the value is
+        strcpy(local_value_address, buffer_value_address);
+        // assign this address to var
+        *var = local_value_address;
+        return 0;
+    } else if (ptr_control_message->operation == SERVER_KV_GET_RENDEZVOUS){
+
+    }else{
+        // do something and skip the round
+        fprintf(stderr, "kv_get: SERVER_KV_GET something went wrong\n");
+        return 1;
+    }
+
+
+}
+
 
 /**
  * Free everything
@@ -236,4 +314,107 @@ int kv_close(void *kv_handle){
     pp_close_ctx(ptr_kv_handle->ctx);
     ibv_free_device_list(ptr_kv_handle->dev_list);
     free(ptr_kv_handle->rem_dest);
+}
+
+int _handle_eager_kv_set(KeyValueAddressArray *database, ControlMessage
+*ptr_control_message){
+    // According to eager protocol: the buffer will contain key and value
+    char *control_message_buf = ptr_control_message->buf;
+    // The key will be from the start address till first null terminator
+    char *buf_key_address = control_message_buf;
+    int key_length = strlen(buf_key_address);
+    char *local_key_address = malloc(key_length + 1);
+    strcpy(local_key_address, buf_key_address);
+    // The value will be following right after key
+    char *buf_value_address = control_message_buf + key_length + 1;
+    int value_len = strlen(buf_value_address);
+    char *local_value_address = malloc(value_len + 1);
+    strcpy(local_value_address, buf_value_address);
+    // insert the result to local database
+    KeyValueAddressPair entry = {local_key_address, local_value_address,
+                                 value_len + 1};
+    insert_array(database, &entry);
+    return 0;
+}
+
+int _handle_client_kv_get(KeyValueAddressArray *database, ControlMessage
+*ptr_control_message, KVHandle *ptr_kv_handle){
+    // According to eager protocol: the buffer will contain key and value
+    char *control_message_buf = ptr_control_message->buf;
+    // The key will be from the start address till first null terminator
+    char *buf_key_address = control_message_buf;
+    // get the corresponding key_val_pair in database
+    KeyValueAddressPair *get_kv_pair = get_KeyValueAddressPair(database,
+                                                           buf_key_address);
+    // todo: if didn't exist in database: send another opcode
+    if (get_kv_pair->value_size < CONTROL_MESSAGE_BUFFER_SIZE){
+        /// We will send the value directly
+        ControlMessage *key_value_pair = (ControlMessage *)
+                ptr_kv_handle->ctx->mr_send_start_ptr;
+        /// We will just mem_copy to a registered memory region: mr_control
+        key_value_pair->operation = SERVER_KV_GET_EAGER;
+        strcpy(key_value_pair->buf, get_kv_pair->value_address);
+        /// send the message
+        pp_post_send(ptr_kv_handle->ctx);
+        // todo: wait for complete regulate how many are send and how many
+        //  are receive, get all the receive?
+//        struct ibv_wc *send_completed = pp_wait_next_complete
+//                (ptr_kv_handle->ctx);
+//        if (next_complete_wc->opcode != IBV_WC_RECV){
+//            // do something and skip the round
+//            continue;
+//        }
+        return 0;
+    }
+}
+
+
+
+/**
+ * Server will just run this function, and respond to the clients requests
+ * todo: handle the free resource here!!!
+ * @return
+ */
+int run_server(KVHandle *kv_handle){
+    /// Initialize database: basically array of (key_addr, value_addr)
+    KeyValueAddressArray *database = initialize_KeyValueAddressArray(20);
+
+    while (1){
+        // todo: this wait complete need to be modified!!! Three place in total
+        struct ibv_wc *next_complete_wc = pp_wait_next_complete(kv_handle->ctx);
+        if (next_complete_wc->opcode != IBV_WC_RECV){
+            // do something and skip the round
+            continue;
+        }
+        /// get the memory region
+        int mr_id = (int) next_complete_wc->wr_id;
+        // make it a pointer because we need to change it later
+        struct MRInfo *ptr_mr_receive = kv_handle->ctx->array_mr_receive_info +
+                                        mr_id;
+        // cast the memory region in form of struct Control message
+        ControlMessage *ptr_control_message = (ControlMessage *)
+                ptr_mr_receive->mr_start_ptr;
+
+        /// handle it
+        // if we get a message from any client to tell us finish experiment
+        if (ptr_control_message->operation == SHUT_DOWN_SERVER){
+            break;
+        }
+        // eager set kv
+        if (ptr_control_message->operation == EAGER_KV_SET){
+            _handle_eager_kv_set(database, ptr_control_message);
+        }
+
+        /// Finish handling this receive, this region can be post receive again
+        ptr_mr_receive->mr_status = FREE;
+
+        /// free this work complete
+        free(next_complete_wc);
+
+        /// for testing: see how many value are set
+        print_dynamic_array(database);
+    }
+
+    /// free the database and every allocated memory inside
+    free_array(database);
 }

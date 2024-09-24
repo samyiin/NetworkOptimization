@@ -20,19 +20,14 @@
 #define RX_DEPTH 100
 
 /**
- * The communication protocol
- */
-enum Protocol{
-    EAGER = 1,
-    RENDEZVOUS = 2,
-};
-
-/**
  * The performed operation
  */
 enum Operation{
-    KV_SET = 1,
-    KV_GET = 2,
+    SHUT_DOWN_SERVER = -1,
+    EAGER_KV_SET = 0,
+    CLIENT_KV_GET = 1,
+    SERVER_KV_GET_EAGER = 2,
+    SERVER_KV_GET_RENDEZVOUS = 3,
 };
 
 /**
@@ -64,8 +59,8 @@ typedef struct KVHandle{
 }KVHandle;
 
 typedef struct ControlMessage{
-    enum Protocol protocol;
     enum Operation operation;
+    size_t value_size;
     char buf[CONTROL_MESSAGE_BUFFER_SIZE];
 }ControlMessage;
 
@@ -73,8 +68,11 @@ int kv_open(char *servername, void **kv_handle);
 
 int kv_set(void *kv_handle, const char *key, const char *value);
 
+int kv_get(void *kv_handle, const char *key, char **var);
+
 int kv_close(void *kv_handle);
 
-int handle_requests();
+int run_server(KVHandle *kv_handle);
+
 
 #endif //NETWORKOPTIMIZATION_KV_API_H
