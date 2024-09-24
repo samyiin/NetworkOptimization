@@ -25,16 +25,7 @@
 #include <byteswap.h>
 
 
-/*
- * No matter how much we set RX to be, there is always a possibility that
- * the client are sending so fast, the server will not have enough rec_wr to
- * receive them, Then those send request is queued.
- * But the higher we set RX_DEPTH, the less likely that will happen. But
- * when RX_DEPTH is too high, when we send large messages, speed will drop.
- * probably because it exceeds the buffer size, so the send request is queued?
- */
-#define TX_DEPTH 5000
-#define RX_DEPTH 5000
+
 
 /*
  * The WC_BATCH should also be related to tx_depth and rx_depth.
@@ -92,12 +83,23 @@ extern int page_size;
  * Added PINGPONG_WRITE_WRID
  */
 enum {
-    PINGPONG_RECV_WRID = 1,
-    PINGPONG_SEND_WRID = 2,
-    PINGPONG_WRITE_WRID = 3,
+    PINGPONG_SEND_WRID = 0,
+    PINGPONG_WRITE_WRID = 1,
 };
 
+enum MRStatus{
+    FREE = 0,
+    IN_RECEIVE_QUEUE = 1,
+};
 
+/**
+ * This struct is used for receive memory regions.
+ */
+struct MRInfo{
+    struct ibv_mr       *mr;
+    void                *mr_start_ptr;
+    enum MRStatus       mr_status;
+};
 
 /**
  * context
@@ -114,11 +116,10 @@ enum {
  * ==========================================================================
  * mr_control                   memory region for control message
  * mr_control_start_ptr         ptr to the buffer of mr_control
- * mr_rdma_write                memory region for rdma write
+ * mr_rdma_write                memory region for rdma writemr_receive
  * mr_rdma_write_start_ptr      ptr to the buffer of mr_rdma_write
  * mr_control_size              size of control message
  * mr_rdma_write_size           size of rdma_write message
- * message_size                 size of message to send
  * ==========================================================================
  * remote_buf_va                the virtual address of remote buffer
  * remote_buf_rkey              the virtual address of remote key
@@ -127,16 +128,17 @@ struct pingpong_context {
     struct ibv_context		    *context;
     struct ibv_comp_channel	    *channel;
     struct ibv_pd		        *pd;
-    struct ibv_mr		        *mr_control;
     struct ibv_mr               *mr_rdma_write;
     struct ibv_cq		        *cq;
     struct ibv_qp		        *qp;
     void			            *buf;
-    void                        *mr_control_start_ptr;
-    void                        *mr_rdma_write_start_ptr;
+    struct ibv_mr		        *mr_control_send;
+    void                        *mr_send_start_ptr;
     int                         mr_control_size;
+    struct MRInfo               *array_mr_receive_info;
+
+    void                        *mr_rdma_write_start_ptr;
     int                         mr_rdma_write_size;
-    int				            message_size;
     int				            rx_depth;
     int				            routs;
     struct ibv_port_attr	    portinfo;
@@ -157,6 +159,7 @@ struct pingpong_dest {
     int psn;
     union ibv_gid gid;
 };
+
 
 
 enum ibv_mtu pp_mtu_to_enum(int mtu);
@@ -187,7 +190,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int
 
 int pp_close_ctx(struct pingpong_context *ctx);
 
-int pp_post_recv(struct pingpong_context *ctx, int n);
+int pp_post_recv(struct pingpong_context *ctx);
 
 int pp_post_rdma_write(struct pingpong_context *ctx);
 

@@ -9,9 +9,15 @@
 #define NETWORKOPTIMIZATION_KV_API_H
 
 # include "ib_functions.h"
-# include "dynamic_array.h"
-#define CONTROL_MESSAGE_BUFFER_SIZE 4096
 
+#define CONTROL_MESSAGE_BUFFER_SIZE 4096
+/**
+ * When receive queue are different memory regions, then RX_DEPTH cannot be
+ * too deep, else the RAM explodes. RX_depth should be about the same size
+ * as client - one receive buffer for one client. Suppose we have 100 clients.
+ */
+#define TX_DEPTH 100
+#define RX_DEPTH 100
 
 /**
  * The communication protocol
@@ -21,6 +27,13 @@ enum Protocol{
     RENDEZVOUS = 2,
 };
 
+/**
+ * The performed operation
+ */
+enum Operation{
+    KV_SET = 1,
+    KV_GET = 2,
+};
 
 /**
  * Basically all the fields we later used
@@ -48,11 +61,11 @@ typedef struct KVHandle{
     int                      gidx;
     // empty buffer for inet_ntop to store the my_dest.gid, later for printing.
     char                     gid[33];
-    enum Protocol                      protocol;
 }KVHandle;
 
 typedef struct ControlMessage{
     enum Protocol protocol;
+    enum Operation operation;
     char buf[CONTROL_MESSAGE_BUFFER_SIZE];
 }ControlMessage;
 
@@ -61,5 +74,7 @@ int kv_open(char *servername, void **kv_handle);
 int kv_set(void *kv_handle, const char *key, const char *value);
 
 int kv_close(void *kv_handle);
+
+int handle_requests();
 
 #endif //NETWORKOPTIMIZATION_KV_API_H

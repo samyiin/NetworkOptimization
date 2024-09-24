@@ -1,4 +1,5 @@
 #include "kv_api.h"
+# include "dynamic_array.h"
 
 
 /**
@@ -58,7 +59,6 @@ int kv_open(char *servername, void **kv_handle){
             return 1;
         }
     }
-
     /// initialization: create the ctx
     my_kv_handle->ctx = pp_init_ctx(my_kv_handle->ib_dev,
                                     my_kv_handle->mr_control_size,
@@ -74,10 +74,12 @@ int kv_open(char *servername, void **kv_handle){
      * "Fill up" the receive queue with receive work requests
      * If use_event means we will use channels to notify CQ when a task is done
      */
-    my_kv_handle->ctx->routs = pp_post_recv(my_kv_handle->ctx,
-                                            my_kv_handle->ctx->rx_depth);
-    if (my_kv_handle->ctx->routs < my_kv_handle->ctx->rx_depth) {
-        fprintf(stderr, "Couldn't post receive (%d)\n", my_kv_handle->ctx->routs);
+    // fill up the receive queue
+    if (pp_post_recv(my_kv_handle->ctx) == 0){
+        my_kv_handle->ctx->routs =my_kv_handle->ctx->rx_depth;
+    }else {
+        fprintf(stderr, "kv_open Couldn't post receive (%d)\n",
+                my_kv_handle->ctx->routs);
         return 1;
     }
 
@@ -189,21 +191,22 @@ int kv_open(char *servername, void **kv_handle){
  */
 int kv_set(void *kv_handle, const char *key, const char *value){
     KVHandle *ptr_kv_handle = (KVHandle *) kv_handle;
-    if (ptr_kv_handle->protocol == EAGER){
+
+    if (strlen(key) + strlen(value) + 2 <= CONTROL_MESSAGE_BUFFER_SIZE){
         /// send a message to the server containing key and value
         /// concatenate the mr_control_start_pointer as a kv_addr_pair pointer
         ControlMessage *key_value_pair = (ControlMessage *)
-                ptr_kv_handle->ctx->mr_control_start_ptr;
+                ptr_kv_handle->ctx->mr_send_start_ptr;
         /// We will just mem_copy to a registered memory region: mr_control
         key_value_pair->protocol = EAGER;
+        key_value_pair->operation = KV_SET;
         strcpy(key_value_pair->buf, key);
         strcpy(key_value_pair->buf + strlen(key) + 1, value);
         /// send the message
         pp_post_send(ptr_kv_handle->ctx);
-        /// Wait for this send to finish and complete response from server
-        pp_wait_completions(ptr_kv_handle->ctx, 2);
-        // todo: write the server part of this!!! decode + an array of
-        //  pointers of key value pair. 
+        /// Wait for this send to finish (it's secure so need need confirm)
+        pp_wait_completions(ptr_kv_handle->ctx, 1);
+        printf("Client: kv_set complete!");
     }else{
 //        /// It's more expensive to perform mem_copy than register memory.
 //        /// So we will register the address of the value as a memory region.

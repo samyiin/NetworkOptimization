@@ -454,7 +454,7 @@ struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
  * memory regions, the first is for controlled message (small messages like
  * rdma_send), the second if for bigger messages for rdma_write.
  *
- * mr_control uses the memory region where 'mr_control_start_ptr' points at,
+ * mr_control_send uses the memory region where 'mr_send_start_ptr' points at,
  * and the mr_control_size is 'mr_control_size',
  * mr_rdma_write starts at where 'mr_rdma_write_start_ptr' points at,
  *
@@ -476,19 +476,17 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
     struct pingpong_context *ctx;
 
     ctx = calloc(1, sizeof *ctx);
-    if (!ctx)
+    if (!ctx){
         return NULL;
+    }
 
-    // The default message size is the max_size of control message: 4KB
+
+    /// The default message size is the max_size of control message: 4KB
     ctx->mr_control_size = mr_control_size;
     ctx->rx_depth = rx_depth;
     ctx->routs = rx_depth;
 
-    // allocate mr_control_size for ctx buffer: both the region for control message and
-    // the region for rdma write
-
-
-    // connect to local device
+    /// connect to local device
     ctx->context = ibv_open_device(ib_dev);
     if (!ctx->context) {
         fprintf(stderr, "Couldn't get context for %s\n",
@@ -497,7 +495,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
     }
 
 
-    // Create a channel for polling completion queue
+    /// Create a channel for polling completion queue
     if (use_event) {
         ctx->channel = ibv_create_comp_channel(ctx->context);
         if (!ctx->channel) {
@@ -507,35 +505,52 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
     } else
         ctx->channel = NULL;
 
-    // allocate protection domain
+    /// allocate protection domain
     ctx->pd = ibv_alloc_pd(ctx->context);
     if (!ctx->pd) {
         fprintf(stderr, "Couldn't allocate PD\n");
         return NULL;
     }
 
-    // register mr: this mr is for control messages
-
-
-
-    int buffer_size = roundup(ctx->mr_control_size, page_size);
-
-    ctx->mr_control_start_ptr = malloc(buffer_size);
-    if (!ctx->mr_control_start_ptr) {
+    /// register mr:
+    // one mr for sending messages, rx_depth mr for receiving messages
+    int buffer_size = roundup(ctx->mr_control_size * (rx_depth + 1),
+                              page_size);
+    void *buffer = malloc(buffer_size);
+    if (!buffer) {
         fprintf(stderr, "Couldn't allocate work buf.\n");
         return NULL;
     }
-
     // fill up the buffer region with value (if it's server then 124, else 123)
-    memset(ctx->mr_control_start_ptr, 0x7b + is_server, buffer_size);
-    ctx->mr_control = ibv_reg_mr(ctx->pd, ctx->mr_control_start_ptr,
-                                 ctx->mr_control_size, IBV_ACCESS_LOCAL_WRITE);
-    if (!ctx->mr_control) {
-        fprintf(stderr, "Couldn't register MR\n");
+    memset(buffer, 0x7b + is_server, buffer_size);
+
+    // the first mr is for sending messages
+    ctx->mr_send_start_ptr = buffer;
+    ctx->mr_control_send = ibv_reg_mr(ctx->pd, ctx->mr_send_start_ptr,
+                                      ctx->mr_control_size, IBV_ACCESS_LOCAL_WRITE);
+    if (!ctx->mr_control_send) {
+        fprintf(stderr, "Couldn't register send MR\n");
         return NULL;
     }
 
-    // create CQ: the mr_control_size of CQ = rx_depth + tx_depth
+    // the rest rx_depth mr is for receiving messages
+    ctx->array_mr_receive_info = malloc(sizeof(struct MRInfo) * rx_depth);
+    for (int i = 0; i < rx_depth; i++){
+        // for readability, we create a ptr that points to the mr_info
+        struct MRInfo *ptr_mr_info = &ctx->array_mr_receive_info[i];
+        ptr_mr_info->mr_start_ptr = buffer + (i + 1) *  mr_control_size;
+        ptr_mr_info->mr = ibv_reg_mr(ctx->pd, ptr_mr_info->mr_start_ptr,
+                                     ctx->mr_control_size, IBV_ACCESS_LOCAL_WRITE);
+        if (!ptr_mr_info->mr) {
+            fprintf(stderr, "Couldn't register receive MR\n");
+            return NULL;
+        }
+        ptr_mr_info->mr_status = FREE;
+    }
+
+
+
+    /// create CQ: the mr_control_size of CQ = rx_depth + tx_depth
     ctx->cq = ibv_create_cq(ctx->context, rx_depth + tx_depth, NULL,
                             ctx->channel, 0);
     if (!ctx->cq) {
@@ -543,7 +558,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         return NULL;
     }
 
-    // create QP: CQ for send and receive are the same
+    /// create QP: CQ for send and receive are the same
     {
         struct ibv_qp_init_attr attr = {
                 .send_cq = ctx->cq,
@@ -590,6 +605,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
             fprintf(stderr, "Failed to query QP for max inline\n");
             return NULL;
         }
+
         // store the max inline number
         max_inline = qp_attr.cap.max_inline_data;
     }
@@ -618,19 +634,34 @@ int pp_close_ctx(struct pingpong_context *ctx) {
         return 1;
     }
 
-    free(ctx->mr_control_start_ptr);
-    if (ibv_dereg_mr(ctx->mr_control)) {
-        fprintf(stderr, "Couldn't deregister MR_control\n");
+    if (ibv_dereg_mr(ctx->mr_control_send)) {
+        fprintf(stderr, "Couldn't deregister MR_control_send\n");
         return 1;
     }
 
+    // deregister all the memory region for
+    for (int i = 0; i < ctx->rx_depth; i++){
+        struct MRInfo receive_mr_info = ctx->array_mr_receive_info[i];
+        if (ibv_dereg_mr(receive_mr_info.mr)) {
+            fprintf(stderr, "Couldn't deregister MR_control_send\n");
+            return 1;
+        }
+    }
+    // free the array_mr_receive_info
+    free(ctx->array_mr_receive_info);
+
+    // mr_send_start_ptr is also the pointer of total buffer, we malloc all
+    // these together
+    free(ctx->mr_send_start_ptr);
+
+
     /// If we registered the start pointer
     if (ctx->mr_rdma_write_start_ptr != NULL){
-        free(ctx->mr_rdma_write_start_ptr);
         if (ibv_dereg_mr(ctx->mr_rdma_write)) {
             fprintf(stderr, "Couldn't deregister MR_rdma_write\n");
             return 1;
         }
+        free(ctx->mr_rdma_write_start_ptr);
     }
 
 
@@ -659,37 +690,40 @@ int pp_close_ctx(struct pingpong_context *ctx) {
 
 /**
  * post receive work request to the receive work queue.
- * Notice: how much data you are expected to receive must match exactly how
- * much data the other node is sending. Since we are posting several receive
- * in advance, we will fix the expected recieve size to be mr_control_size
+ * We made an adjustments to this function: it will fill up the receive queue.
  *
  * @param ctx
  * @param n
- * @return
+ * @return if successfully filled all receive: 0, else: 1
  */
-int pp_post_recv(struct pingpong_context *ctx, int n) {
-    // scatter gather element
-    struct ibv_sge list = {
-            .addr    = (uintptr_t) ctx->mr_control_start_ptr,
-            // Here it is how much data you are expected to receive
-            .length = ctx->mr_control_size,
-            .lkey    = ctx->mr_control->lkey
-    };
-    // work request
-    struct ibv_recv_wr wr = {
-            .wr_id        = PINGPONG_RECV_WRID,
-            .sg_list    = &list,
-            .num_sge    = 1,
-            .next       = NULL
-    };
-    struct ibv_recv_wr *bad_wr;
-    int i;
-
-    for (i = 0; i < n; ++i)
-        if (ibv_post_recv(ctx->qp, &wr, &bad_wr))
-            break;
-
-    return i;
+int pp_post_recv(struct pingpong_context *ctx) {
+    for (int i = 0; i < ctx->rx_depth; i++){
+        struct MRInfo receive_mr_info = ctx->array_mr_receive_info[i];
+        if (receive_mr_info.mr_status == FREE){
+            /// put this mr to post receive
+            // scatter gather element
+            struct ibv_sge list = {
+                    .addr    = (uintptr_t) receive_mr_info.mr_start_ptr,
+                    // Here it is how much data you are expected to receive
+                    .length = ctx->mr_control_size,
+                    .lkey    = receive_mr_info.mr->lkey
+            };
+            // work request
+            struct ibv_recv_wr wr = {
+                    .wr_id        = i,      // the mr_id for this mr_receive
+                    .sg_list    = &list,
+                    .num_sge    = 1,
+                    .next       = NULL
+            };
+            struct ibv_recv_wr *bad_wr;
+            if (ibv_post_recv(ctx->qp, &wr, &bad_wr)){
+                return 1;
+            }
+            /// change the status to in receive queue
+            ctx->array_mr_receive_info[i].mr_status = IN_RECEIVE_QUEUE;
+        }
+    }
+    return 0;
 }
 
 /**
@@ -748,10 +782,10 @@ int pp_post_send(struct pingpong_context *ctx) {
      * The message to send is stored in buffer location
      */
     struct ibv_sge list = {
-            .addr    = (uint64_t) ctx->mr_control_start_ptr,
+            .addr    = (uint64_t) ctx->mr_send_start_ptr,
             .length = ctx->mr_control_size,
             // lkey: local key for local mr_control
-            .lkey    = ctx->mr_control->lkey
+            .lkey    = ctx->mr_control_send->lkey
     };
     unsigned int flags = IBV_SEND_SIGNALED;
     if (ctx->mr_control_size <= max_inline) {
@@ -794,11 +828,10 @@ int pp_post_send(struct pingpong_context *ctx) {
 int pp_wait_completions(struct pingpong_context *ctx, int n_complete) {
     int rcnt = 0, scnt = 0;
     while (rcnt + scnt < n_complete) {
+        /// poll cq
         // wc: work completion buffer
         struct ibv_wc wc[WC_BATCH];
         int ne, i;
-
-        // poll cq
         do {
             // poll at most WC_BATCH from the CQ. But, we make sure we will
             // poll exactly "n_complete" number of entries from the CQ.
@@ -812,8 +845,8 @@ int pp_wait_completions(struct pingpong_context *ctx, int n_complete) {
 
         } while (ne < 1);
 
-        // ne: (number of entries): number of completion returned by
-        // ibv_poll_cq
+        /// process each completed wr
+        // ne: number of completion returned by ibv_poll_cq
         for (i = 0; i < ne; ++i) {
             // check correctness
             if (wc[i].status != IBV_WC_SUCCESS) {
@@ -823,54 +856,31 @@ int pp_wait_completions(struct pingpong_context *ctx, int n_complete) {
                 return 1;
             }
 
-            // processed the item in CQ that we polled: increment scnt and
-            // rcnt counter, so that the main loop continues.
-            switch ((int) wc[i].wr_id) {
-                case PINGPONG_SEND_WRID:
+            // Process each type of request: we change the case to opcode
+            int mr_id;
+            switch (wc[i].opcode) {
+                case IBV_WC_SEND:
                     ++scnt;
                     break;
-                case PINGPONG_WRITE_WRID:
+                case IBV_WC_RDMA_WRITE:
                     ++scnt;
                     break;
 
-
-                case PINGPONG_RECV_WRID:
-                    /*
-                     * If number of receive request in in Receive queue is below
-                     * certain threshold, it will post another n receive
-                     * requests where n = ctx->rx_depth - ctx->routs; basically
-                     * fill up the receive queue.
-                     * Notice, each iteration we are just processing one receive
-                     * . So we increment receive counter by one.
-                     *
-                     * routs: number of receive work requests that are currently
-                     * in the receive queue (technically rwr that are currently
-                     * not completed).
-                     * rx_depth: max number of receive work request that can be
-                     * posted to the receive queue.
-                     *
-                     * 1. decrement ctx->routs by 1: because one of the receive
-                     * work request is completed.
-                     * 2. increment ctx->routs by i that is returned by
-                     * pp_post_recv, i indicates how many new receive wr we
-                     * successfully posted into the receive queue.
-                     *
-                     * If we didn't successfully post all receive request (post
-                     * n RWR into RQ so that RQ is 'full' (according to
-                     * rx_depth), then we raise error.
-                     *
-                     * So basically we will 'fill up' RQ once the number of RWR
-                     * inside is less than REFILL_RWR_THRES.
-                     */
+                case IBV_WC_RECV:
+                    /// Set the receive mr status to FREE
+                    // mr id is the wr_id
+                    mr_id = (int) wc[i].wr_id;
+                    ctx->array_mr_receive_info[mr_id].mr_status = FREE;
+                    // if routs are lower than threshold, we refill post_recev
                     if (--ctx->routs <= REFILL_RWR_THRES) {
-                        ctx->routs += pp_post_recv(ctx,
-                                                   ctx->rx_depth - ctx->routs);
-                        if (ctx->routs < ctx->rx_depth) {
-                            fprintf(stderr,
-                                    "Couldn't post receive (%d)\n",
+                        // this will fill up receive queue
+                        if (pp_post_recv(ctx) != 0){
+                            fprintf(stderr, "wait_complete Couldn't post "
+                                            "receive (%d)\n",
                                     ctx->routs);
                             return 1;
                         }
+                        ctx->routs = ctx->rx_depth;
                     }
                     ++rcnt;
                     break;

@@ -83,6 +83,9 @@ void insert_array(KeyValueAddressArray *my_array, KeyValueAddressPair
  * @param my_array
  */
 void free_array(KeyValueAddressArray *my_array){
+    for (int i = 0; i < my_array->used_length; i++){
+        /// free each malloc key and value address
+    }
     free(my_array->head);
     free(my_array);
 }
@@ -108,28 +111,28 @@ void get_value_ptr(KeyValueAddressArray *my_array, char *key, char
     *value_ptr = NULL;
 }
 
-int main(){
-    KeyValueAddressPair pair1, pair2, pair3;
-    char *key1 = "key1", *key2 = "key2", *key3 = "key3";
-    char *val1 = "answer1", *val2 = "answer2", *val3 = "answer3";
-
-    pair1.key_address = key1;
-    pair1.value_address = val1;
-
-    pair2.key_address = key2;
-    pair2.value_address = val2;
-
-
-    KeyValueAddressArray *ptr_my_array = initialize_KeyValueAddressArray(1);
-    insert_array(ptr_my_array, &pair1);
-    insert_array(ptr_my_array, &pair2);
-    printf("%zu", ptr_my_array->total_length);
-    printf("%zu", ptr_my_array->used_length);
-
-
-    char *value;
-    get_value_ptr(ptr_my_array, key1, &value);
-    printf("%s", value);
-}
+//int main(){
+//    KeyValueAddressPair pair1, pair2, pair3;
+//    char *key1 = "key1", *key2 = "key2", *key3 = "key3";
+//    char *val1 = "answer1", *val2 = "answer2", *val3 = "answer3";
+//
+//    pair1.key_address = key1;
+//    pair1.value_address = val1;
+//
+//    pair2.key_address = key2;
+//    pair2.value_address = val2;
+//
+//
+//    KeyValueAddressArray *ptr_my_array = initialize_KeyValueAddressArray(1);
+//    insert_array(ptr_my_array, &pair1);
+//    insert_array(ptr_my_array, &pair2);
+//    printf("%zu", ptr_my_array->total_length);
+//    printf("%zu", ptr_my_array->used_length);
+//
+//
+//    char *value;
+//    get_value_ptr(ptr_my_array, key1, &value);
+//    printf("%s", value);
+//}
 
 #endif //NETWORKOPTIMIZATION_DYNAMIC_ARRAY_H

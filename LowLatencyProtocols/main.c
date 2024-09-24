@@ -3,6 +3,7 @@
 //
 #include <time.h>
 # include "kv_api.h"
+
 /**
  * We will start from client send one message to server, and then once
  * server receive one message, it will send one message back to client, and
@@ -101,13 +102,14 @@ int main(int argc, char *argv[])
 
     /// Create an empty pointer, kv_open will add stuff to it
     KVHandle *kv_handle;
-    kv_open(servername, (void*) &kv_handle);
+    if (kv_open(servername, (void*) &kv_handle) == 1){
+        printf("hello!");
+        return -1;
+    };
 
-    /// decide communication protocol
-    kv_handle->protocol = EAGER;
 
     /// for test
-    int iters = NUMBER_MESSAGES;
+    int iters = 50;
     latency_test(servername, 0, kv_handle->ctx, iters);
 
     /// free everything
