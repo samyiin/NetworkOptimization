@@ -78,8 +78,11 @@ enum {
  * will be FREE again
  */
 enum MRStatus{
+    // relevant to re-post receive queue
     FREE = 0,
     IN_RECEIVE_QUEUE = 1,
+    // not relevant to receive queue
+    RDMA = 2,
 };
 
 /**
@@ -88,6 +91,7 @@ enum MRStatus{
 struct MRInfo{
     struct ibv_mr       *mr;
     void                *mr_start_ptr;
+    size_t              mr_size;
     enum MRStatus       mr_status;
 };
 
@@ -118,22 +122,18 @@ struct pingpong_context {
     struct ibv_context		    *context;
     struct ibv_comp_channel	    *channel;
     struct ibv_pd		        *pd;
-    struct ibv_mr               *mr_rdma_write;
-    struct ibv_cq		        *cq;
+    struct ibv_cq		        *send_cq;
+    struct ibv_cq		        *receive_cq;
+
     struct ibv_qp		        *qp;
     void			            *buf;
     struct ibv_mr		        *mr_control_send;
     void                        *mr_send_start_ptr;
     int                         mr_control_size;
     struct MRInfo               *array_mr_receive_info;
-
-    void                        *mr_rdma_write_start_ptr;
-    int                         mr_rdma_write_size;
     int				            rx_depth;
     int				            routs;
     struct ibv_port_attr	    portinfo;
-    uint64_t                    remote_buf_va;
-    uint32_t                    remote_buf_rkey;
 };
 
 /**
@@ -186,7 +186,9 @@ int pp_post_rdma_write(struct pingpong_context *ctx);
 
 int pp_post_send(struct pingpong_context *ctx);
 
-int pp_wait_n_completions(struct pingpong_context *ctx, int n_complete);
+int poll_n_send_wc(struct pingpong_context *ctx, int n_complete);
 
-struct ibv_wc *pp_wait_next_complete(struct pingpong_context *ctx);
+int poll_n_receive_wc(struct pingpong_context *ctx, int n_complete, int
+*array_mr_id);
+
 #endif //NETWORKOPTIMIZATION_IB_FUNCTIONS_H

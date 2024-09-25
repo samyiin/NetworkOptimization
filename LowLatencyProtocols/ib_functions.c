@@ -539,6 +539,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         // for readability, we create a ptr that points to the mr_info
         struct MRInfo *ptr_mr_info = &ctx->array_mr_receive_info[i];
         ptr_mr_info->mr_start_ptr = buffer + (i + 1) *  mr_control_size;
+        ptr_mr_info->mr_size = ctx->mr_control_size;
         ptr_mr_info->mr = ibv_reg_mr(ctx->pd, ptr_mr_info->mr_start_ptr,
                                      ctx->mr_control_size, IBV_ACCESS_LOCAL_WRITE);
         if (!ptr_mr_info->mr) {
@@ -548,21 +549,26 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
         ptr_mr_info->mr_status = FREE;
     }
 
+    /// create CQ: the size of send_cq: tx_depth, receive_cq: rx_depth
+    ctx->send_cq = ibv_create_cq(ctx->context, tx_depth, NULL, ctx->channel,
+                                 0);
+    if (!ctx->send_cq) {
+        fprintf(stderr, "Couldn't create send cq\n");
+        return NULL;
+    }
 
-
-    /// create CQ: the mr_control_size of CQ = rx_depth + tx_depth
-    ctx->cq = ibv_create_cq(ctx->context, rx_depth + tx_depth, NULL,
-                            ctx->channel, 0);
-    if (!ctx->cq) {
-        fprintf(stderr, "Couldn't create CQ\n");
+    ctx->receive_cq = ibv_create_cq(ctx->context, rx_depth, NULL,
+                                    ctx->channel, 0);
+    if (!ctx->receive_cq) {
+        fprintf(stderr, "Couldn't create receive_cq\n");
         return NULL;
     }
 
     /// create QP: CQ for send and receive are the same
     {
         struct ibv_qp_init_attr attr = {
-                .send_cq = ctx->cq,
-                .recv_cq = ctx->cq,
+                .send_cq = ctx->send_cq,
+                .recv_cq = ctx->receive_cq,
                 .cap     = {
                         .max_send_wr  = tx_depth,
                         .max_recv_wr  = rx_depth,
@@ -629,8 +635,13 @@ int pp_close_ctx(struct pingpong_context *ctx) {
         return 1;
     }
 
-    if (ibv_destroy_cq(ctx->cq)) {
-        fprintf(stderr, "Couldn't destroy CQ\n");
+    if (ibv_destroy_cq(ctx->send_cq)) {
+        fprintf(stderr, "Couldn't destroy send_cq\n");
+        return 1;
+    }
+
+    if (ibv_destroy_cq(ctx->receive_cq)) {
+        fprintf(stderr, "Couldn't destroy receive_cq\n");
         return 1;
     }
 
@@ -639,7 +650,7 @@ int pp_close_ctx(struct pingpong_context *ctx) {
         return 1;
     }
 
-    // deregister all the memory region for
+    // deregister all the memory region for receiving control messages
     for (int i = 0; i < ctx->rx_depth; i++){
         struct MRInfo receive_mr_info = ctx->array_mr_receive_info[i];
         if (ibv_dereg_mr(receive_mr_info.mr)) {
@@ -653,16 +664,6 @@ int pp_close_ctx(struct pingpong_context *ctx) {
     // mr_send_start_ptr is also the pointer of total buffer, we malloc all
     // these together
     free(ctx->mr_send_start_ptr);
-
-
-    /// If we registered the start pointer
-    if (ctx->mr_rdma_write_start_ptr != NULL){
-        if (ibv_dereg_mr(ctx->mr_rdma_write)) {
-            fprintf(stderr, "Couldn't deregister MR_rdma_write\n");
-            return 1;
-        }
-        free(ctx->mr_rdma_write_start_ptr);
-    }
 
 
     if (ibv_dealloc_pd(ctx->pd)) {
@@ -726,47 +727,6 @@ int pp_post_recv(struct pingpong_context *ctx) {
     return 0;
 }
 
-/**
- * Post send work request to the send work queue.
- *
- * Why we don't need to worry if send queue is full (like we worried in post
- * receive, and thus we have a loop-break)?
- * probably because in post receive we are posting n receive work
- * request at a time, so we might fail at j << n. Here we are just posting
- * one send work request, so if we fail we immediately know.
- *
- * Notice: The post send will only be used for sending control messages.
- * @param ctx
- * @return
- */
-int pp_post_rdma_write(struct pingpong_context *ctx) {
-    /*
-     * The message to send is stored in buffer location
-     */
-    struct ibv_sge list = {
-            .addr    = (uint64_t) ctx->mr_rdma_write_start_ptr,
-            // This is how much message you are planning to send
-            .length = ctx->mr_rdma_write_size,
-            // lkey: local key for local MR for rdma write
-            .lkey    = ctx->mr_rdma_write->lkey
-    };
-    unsigned int flags = IBV_SEND_SIGNALED;
-    if (ctx->mr_rdma_write_size <= max_inline) {
-        flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
-    }
-    struct ibv_send_wr *bad_wr, wr = {
-            .wr_id        = PINGPONG_WRITE_WRID,
-            .sg_list    = &list,
-            .num_sge    = 1,
-            .opcode     = IBV_WR_RDMA_WRITE,
-            .send_flags = flags,
-            .next       = NULL,
-            .wr.rdma.rkey = ntohl(ctx->remote_buf_rkey),
-            .wr.rdma.remote_addr = bswap_64(ctx->remote_buf_va),
-    };
-
-    return ibv_post_send(ctx->qp, &wr, &bad_wr);
-}
 
 /**
  * Post send work request to the send work queue.
@@ -803,49 +763,74 @@ int pp_post_send(struct pingpong_context *ctx) {
     return ibv_post_send(ctx->qp, &wr, &bad_wr);
 }
 
+///**
+// * Post send work request to the send work queue.
+// *
+// * Why we don't need to worry if send queue is full (like we worried in post
+// * receive, and thus we have a loop-break)?
+// * probably because in post receive we are posting n receive work
+// * request at a time, so we might fail at j << n. Here we are just posting
+// * one send work request, so if we fail we immediately know.
+// *
+// * Notice: The post send will only be used for sending control messages.
+// * @param ctx
+// * @return
+// */
+//int pp_post_rdma_write(struct pingpong_context *ctx) {
+//    /*
+//     * The message to send is stored in buffer location
+//     */
+//    struct ibv_sge list = {
+//            .addr    = (uint64_t) ctx->mr_rdma_write_start_ptr,
+//            // This is how much message you are planning to send
+//            .length = ctx->mr_rdma_write_size,
+//            // lkey: local key for local MR for rdma write
+//            .lkey    = ctx->mr_rdma_write->lkey
+//    };
+//    unsigned int flags = IBV_SEND_SIGNALED;
+//    if (ctx->mr_rdma_write_size <= max_inline) {
+//        flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+//    }
+//    struct ibv_send_wr *bad_wr, wr = {
+//            .wr_id        = PINGPONG_WRITE_WRID,
+//            .sg_list    = &list,
+//            .num_sge    = 1,
+//            .opcode     = IBV_WR_RDMA_WRITE,
+//            .send_flags = flags,
+//            .next       = NULL,
+//            .wr.rdma.rkey = ntohl(ctx->remote_buf_rkey),
+//            .wr.rdma.remote_addr = bswap_64(ctx->remote_buf_va),
+//    };
+//
+//    return ibv_post_send(ctx->qp, &wr, &bad_wr);
+//}
+
+
 /**
- * Poll the completion queue and see see how many receive work request and
- * send work request have been completed. Increment number of completed send
- * wr (scnt) and number of completed receive wr (rcnt) accordingly.
- * If rcnt + scnt >= n_complete, then finish polling.
- *
- * During processing, we also monitor the receive queue, if the number of
- * receive work requests are lower than REFILL_RWR_THRES, we will fill up the
- * receive queue with receive work requests.
- *
- * This function is used for simply waiting for n work requests to complete.
- * We can not do anything to the completed work request.
- *
- * ===========================================================================
- * We made a change to the template: here we will wait for exactly n_complete
- * number of completion.
- *
- *
+ * This function will poll exactly n_complete from the send_cq
  * @param ctx
  * @param n_complete
  * @return
  */
-int pp_wait_n_completions(struct pingpong_context *ctx, int n_complete) {
-    int rcnt = 0, scnt = 0;
-    while (rcnt + scnt < n_complete) {
+int poll_n_send_wc(struct pingpong_context *ctx, int n_complete){
+    int completed = 0;
+    struct ibv_cq *cq = ctx->send_cq;
+    while (completed < n_complete) {
         /// poll cq
         // wc: work completion buffer
         struct ibv_wc wc[WC_BATCH];
         int ne, i;
         do {
             // poll at most WC_BATCH from the CQ.
-            int num_poll = (WC_BATCH > n_complete - rcnt - scnt) ? n_complete - rcnt -
-                                                                   scnt : WC_BATCH;
-            ne = ibv_poll_cq(ctx->cq, num_poll, wc);
+            int num_poll = (WC_BATCH > n_complete - completed) ? n_complete - completed : WC_BATCH;
+            // ne: number of completion returned by ibv_poll_cq
+            ne = ibv_poll_cq(cq, num_poll, wc);
             if (ne < 0) {
                 fprintf(stderr, "poll CQ failed %d\n", ne);
                 return 1;
             }
-
         } while (ne < 1);
-
         /// process each completed wr
-        // ne: number of completion returned by ibv_poll_cq
         for (i = 0; i < ne; ++i) {
             // check correctness
             if (wc[i].status != IBV_WC_SUCCESS) {
@@ -854,74 +839,76 @@ int pp_wait_n_completions(struct pingpong_context *ctx, int n_complete) {
                         wc[i].status, (int) wc[i].wr_id);
                 return 1;
             }
-
-            // Process each type of request: we change the case to opcode
-            int mr_id;
-            switch (wc[i].opcode) {
-                case IBV_WC_SEND:
-                    ++scnt;
-                    break;
-                case IBV_WC_RDMA_WRITE:
-                    ++scnt;
-                    break;
-
-                case IBV_WC_RECV:
-                    /// Set the receive mr status to FREE
-                    // mr id is the wr_id
-                    mr_id = (int) wc[i].wr_id;
-                    ctx->array_mr_receive_info[mr_id].mr_status = FREE;
-                    // if routs are lower than threshold, we refill post_recev
-                    if (--ctx->routs <= REFILL_RWR_THRES) {
-                        // this will fill up receive queue
-                        if (pp_post_recv(ctx) != 0){
-                            fprintf(stderr, "wait_complete Couldn't post "
-                                            "receive (%d)\n",
-                                    ctx->routs);
-                            return 1;
-                        }
-                        ctx->routs = ctx->rx_depth;
-                    }
-                    ++rcnt;
-                    break;
-
-                default:
-                    fprintf(stderr, "Completion for unknown wr_id %d\n",
-                            (int) wc[i].wr_id);
-                    return 1;
+            /// check the opcode of the polled wc
+            if (wc[i].opcode == IBV_WC_SEND || wc[i].opcode ==
+            IBV_WC_RDMA_WRITE) {completed++;}
+            else{
+                fprintf(stderr, "Completion for unknown opcode %d\n",
+                        (int) wc[i].opcode);
+                return 1;
             }
         }
-
     }
     return 0;
 }
 
 /**
- * This function will poll one work complete from cq and check if it's
- * successful, then return it to the user.
+ * This will poll n_complete receive wc from
  * @param ctx
+ * @param n_complete
+ * @param mr_ids an array of receive memory region's id (malloced outside)
  * @return
  */
-struct ibv_wc *pp_wait_next_complete(struct pingpong_context *ctx){
-    /// poll one work complete from cq
-    struct ibv_wc *wc = malloc(sizeof (struct ibv_wc));
-    int ne;
-    do {
-        // poll 1 request from the CQ.
-        int num_poll = 1;
-        ne = ibv_poll_cq(ctx->cq, num_poll, wc);
-        if (ne < 0) {
-            fprintf(stderr, "poll CQ failed %d\n", ne);
-            return NULL;
+int poll_n_receive_wc(struct pingpong_context *ctx, int n_complete, int
+        *array_mr_id){
+    int completed = 0;
+    struct ibv_cq *cq = ctx->receive_cq;
+    while (completed < n_complete) {
+        /// poll cq: the same code as poll_n_send_wc
+        // wc: work completion buffer
+        struct ibv_wc wc[WC_BATCH];
+        int ne, i;
+        do {
+            // poll at most WC_BATCH from the CQ.
+            int num_poll = (WC_BATCH > n_complete - completed) ? n_complete - completed : WC_BATCH;
+            // ne: number of completion returned by ibv_poll_cq
+            ne = ibv_poll_cq(cq, num_poll, wc);
+            if (ne < 0) {
+                fprintf(stderr, "poll CQ failed %d\n", ne);
+                return 1;
+            }
+        } while (ne < 1);
+        /// process each completed wr
+        for (i = 0; i < ne; ++i) {
+            // check correctness
+            if (wc[i].status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+                        ibv_wc_status_str(wc[i].status),
+                        wc[i].status, (int) wc[i].wr_id);
+                return 1;
+            }
+            /// check the opcode of the polled wc
+            if (wc[i].opcode == IBV_WC_RECV) {
+                /// record this memory regions id
+                array_mr_id[completed] = (int) wc[i].wr_id;
+                completed++;
+                /// if routs are lower than threshold, we refill post_recev
+                if (--ctx->routs <= REFILL_RWR_THRES) {
+                    if (pp_post_recv(ctx) != 0){
+                        fprintf(stderr, "wait_complete Couldn't post "
+                                        "receive (%d)\n",
+                                ctx->routs);
+                        return 1;
+                    }
+                    ctx->routs = ctx->rx_depth;
+                }
+            }else{
+                fprintf(stderr, "Completion for unknown opcode %d\n",
+                        (int) wc[i].opcode);
+                return 1;
+            }
         }
-
-    } while (ne == 0);
-    /// Check if the work complete is successful
-    if (wc->status != IBV_WC_SUCCESS) {
-        fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
-                ibv_wc_status_str(wc->status),
-                wc->status, (int) wc->wr_id);
-        return NULL;
     }
-    return wc;
+    // assign the address of dynamic allocated array to given ptr of ptr
+    return 0;
 }
-

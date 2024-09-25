@@ -21,6 +21,8 @@ typedef struct KeyValueAddressPair{
     char* key_address;
     char* value_address;
     size_t value_size;
+    // if this MR is registered, then there is something going on
+    struct MRInfo *in_progress;
 }KeyValueAddressPair;
 
 /**
@@ -66,6 +68,7 @@ void insert_array(KeyValueAddressArray *my_array, KeyValueAddressPair
             // if the key is already in the array, then we update the key
             my_array->head[i].value_address = my_entry->value_address;
             my_array->head[i].value_size = my_entry->value_size;
+            my_array->head[i].in_progress = my_entry->in_progress;
             // free the original value address
             free(original_value_address);
             // free the new key address
@@ -131,8 +134,16 @@ void print_dynamic_array(KeyValueAddressArray *my_array){
         char *my_key = my_array->head[i].key_address;
         char *my_value = my_array->head[i].value_address;
         size_t value_size = my_array->head[i].value_size;
-        printf("Entry: %d, Key: %s, value %s, value size: %zu\n", i, my_key,
-               my_value, value_size);
+        char* in_rdma_progress;
+        if (my_array->head[i].in_progress == NULL){
+            in_rdma_progress = "no one is accessing!";
+        }else{
+            in_rdma_progress = "someone is accessing!";
+        }
+        printf("Entry: %d, Key: %s, value %s, value size: %zu, state: %s\n",
+               i,
+               my_key,
+               my_value, value_size, in_rdma_progress);
     }
 }
 //int main(){

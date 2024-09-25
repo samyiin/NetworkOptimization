@@ -3,89 +3,40 @@
 //
 #include <time.h>
 # include "kv_api.h"
-
-/**
- * We will start from client send one message to server, and then once
- * server receive one message, it will send one message back to client, and
- * then once client receive the message, it will send another one to server.
- * @param servername
- * @param warmup
- * @param ctx
- * @param tx_depth
- * @param list_message_sizes
- * @param len_list_message_sizes
- * @param iters
- * @return
- */
-int latency_test(char *servername, int warmup,
-                 struct pingpong_context *ctx, int iters){
-    // strat timer
-    struct timeval start_time, end_time;
-    long time_elapse;
-    gettimeofday(&start_time, NULL);
-
-    for (int i = 0; i < iters; i++) {
-        if (servername) {
-            // send one message to server
-            if (pp_post_send(ctx)) {
-                fprintf(stderr, "Client couldn't post send\n");
-                return 1;
-            }
-
-            // wait for response from server + send work complete
-            pp_wait_n_completions(ctx, 2);
-
-        }else{
-            if (i == 0){
-                // wait for first message from client
-                pp_wait_n_completions(ctx, 1);
-            }
-
-
-            if (pp_post_send(ctx)) {
-                fprintf(stderr, "Client couldn't post send\n");
-                return 1;
-            }
-
-            if (i == iters - 1){
-                // last time there will not be next message from client
-                pp_wait_n_completions(ctx, 1);
-            }else{
-                // wait for send wr complete + next message from client
-                pp_wait_n_completions(ctx, 2);
-            }
-        }
-    }
-
-    // calculate time elapsed
-    gettimeofday(&end_time, NULL);
-    // calculate time: in milliseconds
-    double const round_trip_time = (end_time.tv_sec - start_time.tv_sec) * 1000.0 + (end_time.tv_usec - start_time.tv_usec)/1000.0;
-
-    // calculate latency
-    double const latency = round_trip_time/ (iters * 2.0);
-
-    // print the latency
-    if (!warmup && servername){
-        printf("Latency:\t\t%.4f\tmilliseconds\n", latency);
-    }
-    return 0;
-}
-
-
-int perform_kv_set_test(const char *servername, void *kv_handle){
+int perform_eager_test(const char *servername, void *kv_handle){
     if (!servername){
         run_server(kv_handle);
     }else{
+        char *my_value;
+
         char *key1 = "key1", *value1 = "value1";
         kv_set(kv_handle, key1, value1);
+        printf("Client: kv_set key: %s, value: %s\n", key1, value1);
+
+        kv_get(kv_handle, key1, &my_value);
+        printf("Got value: %s\n", my_value);
+
         char *key2 = "key2", *value2 = "value2";
         kv_set(kv_handle, key2, value2);
+        printf("Client: kv_set key: %s, value: %s\n", key2, value2);
+
+
+        kv_get(kv_handle, key2, &my_value);
+        printf("Got value: %s\n", my_value);
+
         char *key3 = "key3", *value3 = "value3";
         kv_set(kv_handle, key3, value3);
+        printf("Client: kv_set key: %s, value: %s\n", key3, value3);
+
+        kv_get(kv_handle, key3, &my_value);
+        printf("Got value: %s\n", my_value);
 
         value1 = "new value!!!";
         kv_set(kv_handle, key1, value1);
+        printf("Client: kv_set key: %s, value: %s\n", key1, value1);
+
+        kv_get(kv_handle, key1, &my_value);
+        printf("Got value: %s\n", my_value);
     }
     return 0;
 }
@@ -125,12 +76,8 @@ int main(int argc, char *argv[])
         return -1;
     };
 
-    /// for test
-    int iters = 5000;
-    latency_test(servername, 0, kv_handle->ctx, iters);
-
     /// test kv set
-    perform_kv_set_test(servername, kv_handle);
+    perform_eager_test(servername, kv_handle);
 
     /// free everything
     kv_close(kv_handle);

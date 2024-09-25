@@ -25,9 +25,12 @@
 enum Operation{
     SHUT_DOWN_SERVER = -1,
     EAGER_KV_SET = 0,
-    CLIENT_KV_GET = 1,
-    SERVER_KV_GET_EAGER = 2,
-    SERVER_KV_GET_RENDEZVOUS = 3,
+    RENDEZVOUS_KV_SET_KEY = 1,
+    RENDEZVOUS_KV_SET_SERVER = 2,
+    CLIENT_KV_GET = 11,
+    SERVER_KV_GET_EAGER = 12,
+    SERVER_KV_GET_RENDEZVOUS = 13,
+    SERVER_KV_GET_KEY_NOT_FOUND = 14,
 };
 
 /**
@@ -60,7 +63,6 @@ typedef struct KVHandle{
 
 typedef struct ControlMessage{
     enum Operation operation;
-    size_t value_size;
     char buf[CONTROL_MESSAGE_BUFFER_SIZE];
 }ControlMessage;
 
