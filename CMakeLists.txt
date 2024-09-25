@@ -17,9 +17,10 @@ target_link_libraries(server ibverbs)
 
 # Part Three
 add_executable(LowLatencyProtocols.server LowLatencyProtocols/ib_functions.c LowLatencyProtocols/main.c
-        LowLatencyProtocols/kv_api.c
-        LowLatencyProtocols/kv_api.h)
+        LowLatencyProtocols/kv_api.c)
+target_link_libraries(LowLatencyProtocols.server ibverbs)
 
-add_executable(LowLatencyProtocols.client LowLatencyProtocols/ib_functions.c LowLatencyProtocols/main.c
-        LowLatencyProtocols/kv_api.c
-        LowLatencyProtocols/kv_api.h)
+
+#add_executable(LowLatencyProtocols.client LowLatencyProtocols/ib_functions.c LowLatencyProtocols/main.c
+#        LowLatencyProtocols/kv_api.c
+#        LowLatencyProtocols/kv_api.h)

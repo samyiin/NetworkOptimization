@@ -24,3 +24,19 @@ Need to look at what is service level (sl)
 Also, for multi client, maybe worth check out protection domain
 
 look into port_info
+
+major change:
+1. separate cq to send cq and receive cq
+2. one send mr, but multiple receive mr: in case multiple messages don't override each other ?!
+3. post receive fill just look for unposted receive mr and post them
+4. Now we can wait completion of send wc and receive rc separately
+
+A bit of hazard:
+1. rend control message is opcode (an enum) + buff (4kb) so it's a bit bigger than 4kb
+2. in kv_set, key's len is <= 4kb, but I also add the value size in the buffer, so key's len <= 4kb - sizeof(size_t)
+3. in _handle client_kv_get, if the value size is < 4kb, I will send through EAGER, that means there are some marginal
+cases when key + value > 4kb (so kv set is rendezvous), but value < 4kb (so kv_get is eager). But I think this design
+makes sense
+
+kv_set: EAGER: Check if the value size is indeed less (Trust client?)
+kv_get: trust server? for sure!
