@@ -40,3 +40,9 @@ makes sense
 
 kv_set: EAGER: Check if the value size is indeed less (Trust client?)
 kv_get: trust server? for sure!
+
+when rdma write succeed, it will not use receive wc, but when it failed (usually when rkey is wrong) , the server's receive wc will recieve a
+incomplete wc, need to handle such situation.
+
+in dynamic array, insert array, if the key exists, then we will just update the value, and not update the key, and we will free the key of new entry.
+But if the key of new entry and the key of original entry is the same key, (they are pointing to the same address,

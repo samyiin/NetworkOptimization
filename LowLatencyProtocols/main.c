@@ -37,6 +37,39 @@ int perform_eager_test(const char *servername, void *kv_handle){
 
         kv_get(kv_handle, key1, &my_value);
         printf("Got value: %s\n", my_value);
+
+
+        kv_get(kv_handle, "non-exist-key", &my_value);
+        printf("Got value: %s\n", my_value);
+    }
+    return 0;
+}
+
+int perform_rendezvous_test(const char *servername, void *kv_handle){
+    if (!servername){
+        run_server(kv_handle);
+    }else {
+        char *my_value;
+        const size_t large_value_size = 50000;
+
+        char *key1 = "key1";
+        char value1[large_value_size];
+        memset(value1, 'a', sizeof(value1) - 1);
+        value1[large_value_size - 1] = '\0';
+        kv_set(kv_handle, key1, value1);
+        printf("Client: kv_set key: %s, value: %-10.10s\n", key1, value1);
+
+        kv_get(kv_handle, key1, &my_value);
+        printf("Got value: %-10.10s\n", my_value);
+        kv_release(my_value);
+
+        char *key2 = "key2";
+        char value2[large_value_size];
+        memset(value2, 'b', sizeof(value1) - 1);
+        value1[large_value_size - 1] = '\0';
+        kv_set(kv_handle, key2, value2);
+
+        printf("Client: kv_set key: %s, value: %-10.10s\n", key2, value2);
     }
     return 0;
 }
@@ -76,12 +109,15 @@ int main(int argc, char *argv[])
         return -1;
     };
 
-    /// test kv set
     perform_eager_test(servername, kv_handle);
+
+    /// test kv set
+    perform_rendezvous_test(servername, kv_handle);
 
     /// free everything
     kv_close(kv_handle);
 
+    // todo: if exist by error, the free pointers might get affected
     return 0;
 }
 

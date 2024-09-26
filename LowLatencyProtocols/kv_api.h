@@ -24,13 +24,19 @@
  */
 enum Operation{
     SHUT_DOWN_SERVER = -1,
-    EAGER_KV_SET = 0,
-    RENDEZVOUS_KV_SET_KEY = 1,
-    RENDEZVOUS_KV_SET_SERVER = 2,
-    CLIENT_KV_GET = 11,
-    SERVER_KV_GET_EAGER = 12,
-    SERVER_KV_GET_RENDEZVOUS = 13,
-    SERVER_KV_GET_KEY_NOT_FOUND = 14,
+
+    CLIENT_KV_SET_EAGER = 0,
+    CLIENT_KV_SET_RENDEZVOUS = 1,
+    SERVER_KV_SET_RENDEZVOUS = 2,
+
+    CLIENT_KV_GET = 3,
+    SERVER_KV_GET_EAGER = 4,
+    SERVER_KV_GET_RENDEZVOUS = 5,
+    SERVER_KV_GET_KEY_NOT_FOUND = 6,
+    SERVER_IN_PROGRESS = 7,
+
+    CLIENT_RENDEZVOUS_FIN = 8,
+    SERVER_KV_SET_SUCCESSFUL = 10,
 };
 
 /**
@@ -73,6 +79,8 @@ int kv_set(void *kv_handle, const char *key, const char *value);
 int kv_get(void *kv_handle, const char *key, char **var);
 
 int kv_close(void *kv_handle);
+
+void kv_release(char *value);
 
 int run_server(KVHandle *kv_handle);
 

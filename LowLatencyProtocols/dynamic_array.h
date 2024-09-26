@@ -41,7 +41,9 @@ typedef struct KeyValueAddressArray{
  */
 KeyValueAddressArray *initialize_KeyValueAddressArray(int initial_size){
     KeyValueAddressArray *my_array = malloc(sizeof(KeyValueAddressArray));
-    my_array->head = malloc(sizeof(KeyValueAddressPair) * initial_size);
+    // freed in free_array
+    my_array->head = malloc(sizeof(KeyValueAddressPair) * initial_size);     // freed in free_array
+
     my_array->total_length = initial_size;
     my_array->used_length = 0;
     return my_array;
@@ -63,16 +65,17 @@ void insert_array(KeyValueAddressArray *my_array, KeyValueAddressPair
     for (int i = 0; i < my_array->used_length; i++){
         char *my_key = my_array->head[i].key_address;
         char *insert_key = my_entry->key_address;
+        // If the key are the same string (not necessary same address)
         if (strcmp(my_key, insert_key) ==0){
-            char *original_value_address = my_array->head[i].value_address;
-            // if the key is already in the array, then we update the key
-            my_array->head[i].value_address = my_entry->value_address;
-            my_array->head[i].value_size = my_entry->value_size;
-            my_array->head[i].in_progress = my_entry->in_progress;
             // free the original value address
-            free(original_value_address);
-            // free the new key address
-            free(my_entry->key_address);
+            free(my_array->head[i].value_address);
+            // if the new key is the same string with the old key, but not
+            // the same memory address, we will free the old key
+            if (my_key != insert_key){
+                free(my_array->head[i].key_address);
+            }
+            // copy all the addresses to this key_pair
+            my_array->head[i] = *my_entry;
             return;
         }
     }
@@ -124,27 +127,34 @@ KeyValueAddressPair *get_KeyValueAddressPair(KeyValueAddressArray *my_array,
     return NULL;
 }
 
+
+
 /**
  * For debug, to see the internal state of the array
  * @param my_array
  */
 void print_dynamic_array(KeyValueAddressArray *my_array){
-    printf("=============================================================\n");
+    printf("=============================================================================\n");
     for (int i = 0; i < my_array->used_length; i++) {
         char *my_key = my_array->head[i].key_address;
         char *my_value = my_array->head[i].value_address;
         size_t value_size = my_array->head[i].value_size;
+
         char* in_rdma_progress;
         if (my_array->head[i].in_progress == NULL){
-            in_rdma_progress = "no one is accessing!";
+            in_rdma_progress = "FREE";
         }else{
-            in_rdma_progress = "someone is accessing!";
+            in_rdma_progress = "USING";
         }
-        printf("Entry: %d, Key: %s, value %s, value size: %zu, state: %s\n",
+        printf("Entry: %2d, Key: %.6s, value: %-8.8s, value size: %6zu, "
+               "state: %6s\n",
                i,
                my_key,
                my_value, value_size, in_rdma_progress);
     }
+    printf
+    ("=============================================================================\n\n");
+
 }
 //int main(){
 //    KeyValueAddressPair pair1, pair2, pair3;

@@ -68,8 +68,8 @@ extern int page_size;
  * Work request id, in our exercise not really important.....
  */
 enum {
-    PINGPONG_SEND_WRID = 0,
-    PINGPONG_WRITE_WRID = 1,
+    PINGPONG_SEND_WRID = -1,
+    PINGPONG_WRITE_WRID = -2,
 };
 
 /**
@@ -125,15 +125,28 @@ struct pingpong_context {
     struct ibv_cq		        *send_cq;
     struct ibv_cq		        *receive_cq;
 
+    struct ibv_port_attr	    portinfo;
+
     struct ibv_qp		        *qp;
-    void			            *buf;
+
+    // control messages (send and receive)
     struct ibv_mr		        *mr_control_send;
     void                        *mr_send_start_ptr;
     int                         mr_control_size;
+
+    // control messages receive
     struct MRInfo               *array_mr_receive_info;
     int				            rx_depth;
     int				            routs;
-    struct ibv_port_attr	    portinfo;
+
+    // RDMA context (read and write)
+    struct ibv_mr		        *mr_rdma;
+    void                        *mr_rdma_start_ptr;
+    size_t                      mr_rdma_size;
+    uint64_t                    remote_buf_va;
+    uint32_t                    remote_buf_rkey;
+
+
 };
 
 /**
@@ -182,9 +195,9 @@ int pp_close_ctx(struct pingpong_context *ctx);
 
 int pp_post_recv(struct pingpong_context *ctx);
 
-int pp_post_rdma_write(struct pingpong_context *ctx);
-
 int pp_post_send(struct pingpong_context *ctx);
+
+int pp_post_rdma(struct pingpong_context *ctx, enum ibv_wr_opcode opcode);
 
 int poll_n_send_wc(struct pingpong_context *ctx, int n_complete);
 

@@ -291,7 +291,7 @@ port,
 
     write(sockfd, "done", sizeof "done");
 
-    rem_dest = malloc(sizeof *rem_dest);
+    rem_dest = malloc(sizeof *rem_dest);    // freed in kv_close
     if (!rem_dest)
         goto out;
 
@@ -396,7 +396,7 @@ struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
         goto out;
     }
 
-    rem_dest = malloc(sizeof *rem_dest);
+    rem_dest = malloc(sizeof *rem_dest); // freed in kv_close
     if (!rem_dest)
         goto out;
 
@@ -516,7 +516,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
     // one mr for sending messages, rx_depth mr for receiving messages
     int buffer_size = roundup(ctx->mr_control_size * (rx_depth + 1),
                               page_size);
-    void *buffer = malloc(buffer_size);
+    void *buffer = malloc(buffer_size); // freed in pp_close_ctx
     if (!buffer) {
         fprintf(stderr, "Couldn't allocate work buf.\n");
         return NULL;
@@ -535,6 +535,7 @@ struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
 
     // the rest rx_depth mr is for receiving messages
     ctx->array_mr_receive_info = malloc(sizeof(struct MRInfo) * rx_depth);
+    // freed in pp_close_ctx
     for (int i = 0; i < rx_depth; i++){
         // for readability, we create a ptr that points to the mr_info
         struct MRInfo *ptr_mr_info = &ctx->array_mr_receive_info[i];
@@ -661,8 +662,7 @@ int pp_close_ctx(struct pingpong_context *ctx) {
     // free the array_mr_receive_info
     free(ctx->array_mr_receive_info);
 
-    // mr_send_start_ptr is also the pointer of total buffer, we malloc all
-    // these together
+    // mr_send_start_ptr is also the pointer of total buffer
     free(ctx->mr_send_start_ptr);
 
 
@@ -763,47 +763,45 @@ int pp_post_send(struct pingpong_context *ctx) {
     return ibv_post_send(ctx->qp, &wr, &bad_wr);
 }
 
-///**
-// * Post send work request to the send work queue.
-// *
-// * Why we don't need to worry if send queue is full (like we worried in post
-// * receive, and thus we have a loop-break)?
-// * probably because in post receive we are posting n receive work
-// * request at a time, so we might fail at j << n. Here we are just posting
-// * one send work request, so if we fail we immediately know.
-// *
-// * Notice: The post send will only be used for sending control messages.
-// * @param ctx
-// * @return
-// */
-//int pp_post_rdma_write(struct pingpong_context *ctx) {
-//    /*
-//     * The message to send is stored in buffer location
-//     */
-//    struct ibv_sge list = {
-//            .addr    = (uint64_t) ctx->mr_rdma_write_start_ptr,
-//            // This is how much message you are planning to send
-//            .length = ctx->mr_rdma_write_size,
-//            // lkey: local key for local MR for rdma write
-//            .lkey    = ctx->mr_rdma_write->lkey
-//    };
-//    unsigned int flags = IBV_SEND_SIGNALED;
-//    if (ctx->mr_rdma_write_size <= max_inline) {
-//        flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
-//    }
-//    struct ibv_send_wr *bad_wr, wr = {
-//            .wr_id        = PINGPONG_WRITE_WRID,
-//            .sg_list    = &list,
-//            .num_sge    = 1,
-//            .opcode     = IBV_WR_RDMA_WRITE,
-//            .send_flags = flags,
-//            .next       = NULL,
-//            .wr.rdma.rkey = ntohl(ctx->remote_buf_rkey),
-//            .wr.rdma.remote_addr = bswap_64(ctx->remote_buf_va),
-//    };
-//
-//    return ibv_post_send(ctx->qp, &wr, &bad_wr);
-//}
+/**
+ * Post send work request to the send work queue.
+ *
+ * Why we don't need to worry if send queue is full (like we worried in post
+ * receive, and thus we have a loop-break)?
+ * probably because in post receive we are posting n receive work
+ * request at a time, so we might fail at j << n. Here we are just posting
+ * one send work request, so if we fail we immediately know.
+ *
+ * Notice: The post send will only be used for sending control messages.
+ * @param ctx
+ * @return
+ */
+int pp_post_rdma(struct pingpong_context *ctx, enum ibv_wr_opcode opcode) {
+    /*
+     * The message to send is stored in buffer location
+     */
+    struct ibv_sge list = {
+            .addr    = (uint64_t) ctx->mr_rdma_start_ptr,
+            // This is how much message you are planning to send
+            .length = ctx->mr_rdma_size,
+            // lkey: local key for local MR for rdma write
+            .lkey    = ctx->mr_rdma->lkey
+    };
+    unsigned int flags = IBV_SEND_SIGNALED;
+
+    struct ibv_send_wr *bad_wr, wr = {
+            .wr_id        = PINGPONG_WRITE_WRID,
+            .sg_list    = &list,
+            .num_sge    = 1,
+            .opcode     = opcode,
+            .send_flags = flags,
+            .next       = NULL,
+            .wr.rdma.rkey = ntohl(ctx->remote_buf_rkey),
+            .wr.rdma.remote_addr = bswap_64(ctx->remote_buf_va),
+    };
+
+    return ibv_post_send(ctx->qp, &wr, &bad_wr);
+}
 
 
 /**
@@ -841,7 +839,7 @@ int poll_n_send_wc(struct pingpong_context *ctx, int n_complete){
             }
             /// check the opcode of the polled wc
             if (wc[i].opcode == IBV_WC_SEND || wc[i].opcode ==
-            IBV_WC_RDMA_WRITE) {completed++;}
+            IBV_WC_RDMA_WRITE || wc[i].opcode == IBV_WC_RDMA_READ) {completed++;}
             else{
                 fprintf(stderr, "Completion for unknown opcode %d\n",
                         (int) wc[i].opcode);
@@ -854,6 +852,8 @@ int poll_n_send_wc(struct pingpong_context *ctx, int n_complete){
 
 /**
  * This will poll n_complete receive wc from
+ * Notice: the auto refill will not work if there is only 1 rx_depth,
+ * because the current one is "IN_QUEUE", so there is no other one.
  * @param ctx
  * @param n_complete
  * @param mr_ids an array of receive memory region's id (malloced outside)

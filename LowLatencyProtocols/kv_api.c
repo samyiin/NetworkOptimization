@@ -10,7 +10,7 @@
  */
 int kv_open(char *servername, void **kv_handle) {
     /// Initialize KV handle
-    KVHandle *my_kv_handle = malloc(sizeof(KVHandle));
+    KVHandle *my_kv_handle = malloc(sizeof(KVHandle));  // freed in kv_close
     my_kv_handle->ib_devname = NULL;
     my_kv_handle->port = 12345;
     my_kv_handle->ib_port = 1;
@@ -165,11 +165,6 @@ int kv_open(char *servername, void **kv_handle) {
     inet_ntop(AF_INET6, &my_kv_handle->rem_dest->gid, my_kv_handle->gid,
               sizeof my_kv_handle->gid);
 
-    /// todo this will be deleted later
-    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-           my_kv_handle->rem_dest->lid, my_kv_handle->rem_dest->qpn,
-           my_kv_handle->rem_dest->psn, my_kv_handle->gid);
-
     /**
      * If we are client, we will try to establish connection with the remote
      * If we are server, we already establish connection with remote during
@@ -190,6 +185,75 @@ int kv_open(char *servername, void **kv_handle) {
     }
 }
 
+/**
+ * Store the start pointer of remote control message into
+ * remote_control_message
+ * @param ptr_kv_handle
+ * @param remote_control_message
+ * @return
+ */
+int get_remote_control_message(KVHandle *ptr_kv_handle, ControlMessage
+**remote_control_message){
+    int array_mr_ids[1];
+    if (poll_n_receive_wc(ptr_kv_handle->ctx, 1, array_mr_ids)) {
+        fprintf(stderr, "get_remote_control_message: didn't receive message\n");
+        return 1;
+    }
+    // check which receive buffer got the response
+    int mr_id = array_mr_ids[0];
+    // make it a pointer because we need to set mr status to FREE later
+    struct MRInfo *mr_receive_info =
+            ptr_kv_handle->ctx->array_mr_receive_info + mr_id;
+    *remote_control_message = (ControlMessage *)
+            mr_receive_info->mr_start_ptr;
+    // free the receive mr (It's a single thread program, so we can free it
+    // earlier.
+    mr_receive_info->mr_status = FREE;
+}
+
+/**
+ * Set my_control_message to send
+ * This will mem copy from the input pointers to the send control message mr
+ * @return
+ */
+int set_control_message(KVHandle *ptr_kv_handle, enum Operation
+        operation, const void **array_messages_address, const size_t
+        *array_message_sizes, int array_size){
+    ControlMessage *my_control_message = (ControlMessage *)
+            ptr_kv_handle->ctx->mr_send_start_ptr;
+    my_control_message->operation = operation;
+    void *current_buf_ptr = my_control_message->buf;
+    for (int i = 0; i < array_size; i++){
+        memcpy(current_buf_ptr, array_messages_address[i],
+               array_message_sizes[i]);
+        current_buf_ptr += array_message_sizes[i];
+    }
+    return 0;
+}
+
+/**
+ * Decode the message in control message buffer
+ * If it's a string, provide message size == 0 (unknown)
+ */
+int decode_control_message_buffer(void *control_message_buf, void
+**array_ptr_to_fill, const size_t *array_ptr_sizes, int array_size){
+    if (array_size == 1){
+        array_ptr_to_fill[0] = control_message_buf;
+        return 0;
+    }
+    void *current_buf_ptr = control_message_buf;
+    for (int i = 0; i < array_size; i++){
+        array_ptr_to_fill[i] = current_buf_ptr;
+        if (array_ptr_sizes[i] == 0){
+            // It's a string, so we don't know it's size
+            size_t string_length = strlen(current_buf_ptr) + 1;
+            current_buf_ptr += string_length;
+        }else{
+            current_buf_ptr += array_ptr_sizes[i];
+        }
+    }
+    return 0;
+}
 
 /**
  * This function sets the value of a key on server's side
@@ -205,134 +269,216 @@ int kv_set(void *kv_handle, const char *key, const char *value) {
     KVHandle *ptr_kv_handle = (KVHandle *) kv_handle;
     if (strlen(key) + strlen(value) + 2 <= CONTROL_MESSAGE_BUFFER_SIZE) {
         /// send a message to the server: key + value_size + value
-        // concatenate the mr_control_start_pointer as a kv_addr_pair pointer
-        ControlMessage *key_value_pair = (ControlMessage *)
-                ptr_kv_handle->ctx->mr_send_start_ptr;
-        // We will just mem_copy to a registered memory region: mr_control
-        key_value_pair->operation = EAGER_KV_SET;
-        // key
-        strcpy(key_value_pair->buf, key);
-        // value size
+        size_t key_size = strlen(key) + 1;
         size_t value_size = strlen(value) + 1;
-        *(size_t *) (key_value_pair->buf + strlen(key) + 1) = value_size;
-        // value
-        strcpy(key_value_pair->buf + strlen(key) + 1 + sizeof(size_t), value);
-        // send the message and Wait for this send to finish
+        const void *array_messages_address[3] = {key, &value_size, value};
+        const size_t array_message_sizes[3] = {key_size, sizeof(size_t),
+                                          value_size};
+        set_control_message(ptr_kv_handle, CLIENT_KV_SET_EAGER,
+                            array_messages_address,
+                            array_message_sizes, 3);
         pp_post_send(ptr_kv_handle->ctx);
         if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
             fprintf(stderr, "kv_set EAGER: cannot send message\n");
             return 1;
         }
-        // (probably need one confirm from server)
+
+        /// check if successfully set
+        ControlMessage *remote_control_message;
+        get_remote_control_message(ptr_kv_handle, &remote_control_message);
+
+        // the resource is in progress
+        if (remote_control_message->operation == SERVER_IN_PROGRESS){
+            fprintf(stderr, "kv_set_eager: SERVER_IN_PROGRESS\n");
+            return 2;
+        }
+
+        if (remote_control_message->operation != SERVER_KV_SET_SUCCESSFUL){
+            fprintf(stderr, "kv_set_eager: no SERVER_KV_SET_SUCCESSFUL\n");
+            return 1;
+        }
     } else {
         /// send a control message to the server: key + value size (size_t)
-        // concatenate the mr_control_start_pointer as a kv_addr_pair pointer
-        ControlMessage *key_value_pair = (ControlMessage *)
-                ptr_kv_handle->ctx->mr_send_start_ptr;
-        // We will just mem_copy to a registered memory region: mr_control
-        key_value_pair->operation = RENDEZVOUS_KV_SET_KEY;
-        strcpy(key_value_pair->buf, key);
+        size_t key_size = strlen(key) + 1;
         size_t value_size = strlen(value) + 1;
-        *(size_t *) (key_value_pair->buf + strlen(key) + 1) = value_size;
-        // send the message and Wait for this send to finish
+        const void *array_messages_address[2] = {key, &value_size};
+        const size_t array_message_sizes[2] = {key_size, sizeof(size_t)};
+        set_control_message(ptr_kv_handle, CLIENT_KV_SET_RENDEZVOUS,
+                            array_messages_address,
+                            array_message_sizes, 2);
         pp_post_send(ptr_kv_handle->ctx);
         if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
             fprintf(stderr, "kv_set REND_KEY: cannot send message\n");
             return 1;
         }
-        /// We will register the address of the value as a memory region.
-        // todo: do we need to malloc? do we need it at all?
-        struct pingpong_context *ctx = ptr_kv_handle->ctx;
-        struct MRInfo *mr_rdma_write = malloc(sizeof(struct MRInfo));
-        mr_rdma_write->mr_start_ptr = (void *) (value);
-        mr_rdma_write->mr_status = RDMA;
-        mr_rdma_write->mr_size = value_size;
-        mr_rdma_write->mr = ibv_reg_mr(ctx->pd,
-                                       mr_rdma_write->mr_start_ptr,
-                                       mr_rdma_write->mr_size,
-                                       IBV_ACCESS_LOCAL_WRITE |
-                                       IBV_ACCESS_REMOTE_WRITE);
+
+        /// temporarily register the address of the value as a memory region.
+        ptr_kv_handle->ctx->mr_rdma_start_ptr = (void *) value;
+        ptr_kv_handle->ctx->mr_rdma_size = value_size;
+        ptr_kv_handle->ctx->mr_rdma = ibv_reg_mr(ptr_kv_handle->ctx->pd,
+                                                 ptr_kv_handle->ctx->mr_rdma_start_ptr,
+                                                 ptr_kv_handle->ctx->mr_rdma_size,
+                                                 IBV_ACCESS_LOCAL_WRITE |
+                                                 IBV_ACCESS_REMOTE_WRITE);
+
+
         /// We will get remote va and remote key from server
-        // todo: check if the response is not busy!
-        /// poll 1 receive wc from receive cq: get one response from server
-        int array_mr_ids[1];
-        if (poll_n_receive_wc(ptr_kv_handle->ctx, 1, array_mr_ids)) {
-            fprintf(stderr, "kv_get CLIENT_KV_GET: didn't receive message\n");
+        ControlMessage *remote_control_message;
+        get_remote_control_message(ptr_kv_handle, &remote_control_message);
+
+        // the resource is in progress
+        if (remote_control_message->operation == SERVER_IN_PROGRESS){
+            fprintf(stderr, "kv_set_eager: SERVER_IN_PROGRESS\n");
+            return 2;
+        }
+        if (remote_control_message->operation != SERVER_KV_SET_RENDEZVOUS){
+            fprintf(stderr, "kv_set: no SERVER_KV_SET_RENDEZVOUS\n");
             return 1;
         }
-        // check which receive buffer got the response
-        int mr_id = array_mr_ids[0];
-        // make it a pointer because we need to set mr status to FREE later
-        struct MRInfo *mr_receive_info =
-                ptr_kv_handle->ctx->array_mr_receive_info + mr_id;
-        // cast the memory region in form of struct Control message
-        ControlMessage *control_message = (ControlMessage *)
-                mr_receive_info->mr_start_ptr;
-        // get the remote key and remote va
-        uint64_t remote_buf_va = *(uint64_t*) control_message->buf;
-        uint32_t remote_buf_rkey = *(uint32_t *) (control_message->buf + sizeof(uint64_t));
-        /// todo: We will perform rdma write to the server
-        /// todo: then write fin to server
 
-        /// Finally deregister the mr and free our responsibility
-        if (ibv_dereg_mr(mr_rdma_write->mr)) {
+
+        /// decode remote control message
+        // should be remote va and remote key
+        void *array_ptr_to_fill[2];
+        const size_t array_ptr_sizes[2] = {sizeof(uint64_t), sizeof(uint32_t)};
+        decode_control_message_buffer(remote_control_message->buf,
+                                      array_ptr_to_fill,
+                                      array_ptr_sizes, 2);
+        ptr_kv_handle->ctx->remote_buf_va = *(uint64_t*)array_ptr_to_fill[0];
+        ptr_kv_handle->ctx->remote_buf_rkey = *(uint32_t *)array_ptr_to_fill[1];
+
+        /// RDMA WRITE to server
+        pp_post_rdma(ptr_kv_handle->ctx, IBV_WR_RDMA_WRITE);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "kv_set client RDMA_WRITE: cannot send message\n");
+            return 1;
+        }
+
+        /// Write FIN to server
+        // should specify which key
+        const void *array_messages_address_1[1] = {key};
+        const size_t array_message_sizes_1[1] = {key_size};
+        set_control_message(ptr_kv_handle, CLIENT_RENDEZVOUS_FIN,
+                            array_messages_address_1,
+                            array_message_sizes_1, 1);
+        pp_post_send(ptr_kv_handle->ctx);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "kv_set KV_SET_FIN: cannot send message\n");
+            return 1;
+        }
+
+        /// Finally deregister the mr
+        if (ibv_dereg_mr(ptr_kv_handle->ctx->mr_rdma)) {
             fprintf(stderr, "Couldn't deregister MR_control_send\n");
             return 1;
         }
-        free(mr_rdma_write);
+        ptr_kv_handle->ctx->mr_rdma_start_ptr = NULL;
+        ptr_kv_handle->ctx->mr_rdma_size = 0;
     }
     return 0;
 }
 
+/**
+ * Here we must trust the client: the key exists in the database, the client
+ * was processing the key (RDMA)
+ * @param database
+ * @param remote_control_message
+ * @return
+ */
+int handle_CLIENT_RENDEZVOUS_FIN(KeyValueAddressArray *database,
+                             ControlMessage *remote_control_message){
+    /// decode the messages in remote control buffer
+    // It should contain key + value size
+    void *array_ptr_to_fill[1];
+    const size_t array_ptr_sizes[1] = {0};
+    decode_control_message_buffer(remote_control_message->buf,
+                                  array_ptr_to_fill,
+                                  array_ptr_sizes, 2);
+    char *buf_key_address = array_ptr_to_fill[0];
+
+    /// Get the key value
+    KeyValueAddressPair *get_kv_pair = get_KeyValueAddressPair(database,
+                                                               buf_key_address);
+    /// Deregister the rdma mr
+    struct MRInfo *mr_rdma = get_kv_pair->in_progress;
+    if (ibv_dereg_mr(mr_rdma->mr)) {
+        fprintf(stderr, "Couldn't deregister MR_control_send\n");
+        return 1;
+    }
+    free(mr_rdma);
+
+    /// Update the key_pair status
+    get_kv_pair->in_progress = NULL;
+
+    return 0;
+}
 
 int handle_RENDEZVOUS_KV_SET_KEY(KeyValueAddressArray *database,
-                                  ControlMessage
-*ptr_control_message,  KVHandle *ptr_kv_handle) {
-    // todo: check resource busy!
-    // According to eager protocol: the buffer will contain key and value size
-    char *control_message_buf = ptr_control_message->buf;
-    /// The key will be from the start address till first null terminator
-    char *buf_key_address = control_message_buf;
-    int key_length = strlen(buf_key_address) + 1;
-    char *local_key_address = malloc(key_length);
+                                 ControlMessage *remote_control_message,
+                                 KVHandle *ptr_kv_handle) {
+    /// decode the messages in remote control buffer
+    // It should contain key + value size
+    void *array_ptr_to_fill[2];
+    const size_t array_ptr_sizes[2] = {0, sizeof(size_t)};
+    decode_control_message_buffer(remote_control_message->buf,
+                                  array_ptr_to_fill,
+                                  array_ptr_sizes, 2);
+    char *buf_key_address = array_ptr_to_fill[0];
+    size_t *buf_value_length_address = array_ptr_to_fill[1];
+
+    /// handle special cases: check if the resource is busy (if exists)
+    // get the corresponding key_val_pair in database
+    KeyValueAddressPair *get_kv_pair = get_KeyValueAddressPair(database,
+                                                               buf_key_address);
+    /// the key pair is in progress
+    if (get_kv_pair->in_progress != NULL){
+        set_control_message(ptr_kv_handle, SERVER_IN_PROGRESS, NULL,
+                            NULL, 0);
+        pp_post_send(ptr_kv_handle->ctx);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "handle_CLIENT_KV_GET SERVER_IN_PROGRESS: cannot send message\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    /// Copy key and value_size from remote_control_message buffer to local
+    size_t key_length = strlen(buf_key_address) + 1;
+    char *local_key_address = malloc(key_length);   // freed in free_array
     strcpy(local_key_address, buf_key_address);
-    /// The value size will be following right after key
-    char *buf_value_size_address = control_message_buf + key_length;
-    size_t value_size = *(size_t *) buf_value_size_address;
+    size_t value_length = *(size_t *) buf_value_length_address;
+
     /// Register a memory for client to rdma write
-    char *local_value_address = malloc(value_size);
+    char *local_value_address = malloc(value_length); // freed in free_array
     struct pingpong_context *ctx = ptr_kv_handle->ctx;
-    struct MRInfo *mr_rdma_write = malloc(sizeof(struct MRInfo));
-    mr_rdma_write->mr_start_ptr = (void *) (local_value_address);
-    mr_rdma_write->mr_status = RDMA;
-    mr_rdma_write->mr_size = value_size;
-    mr_rdma_write->mr = ibv_reg_mr(ctx->pd,
-                                   mr_rdma_write->mr_start_ptr,
-                                   mr_rdma_write->mr_size,
+    struct MRInfo *mr_rdma = malloc(sizeof(struct MRInfo)); // freed in handle_CLIENT_RENDEZVOUS_FIN
+    mr_rdma->mr_start_ptr = (void *) (local_value_address);
+    mr_rdma->mr_status = RDMA;
+    mr_rdma->mr_size = value_length;
+    mr_rdma->mr = ibv_reg_mr(ctx->pd,
+                             mr_rdma->mr_start_ptr,
+                             mr_rdma->mr_size,
                                    IBV_ACCESS_LOCAL_WRITE |
                                    IBV_ACCESS_REMOTE_WRITE);
+
     /// Send the remote virtual addr and remote key to client
-    uint64_t remote_buf_va = bswap_64((uintptr_t)mr_rdma_write->mr_start_ptr);
-    uint32_t remote_buf_rkey = htonl(mr_rdma_write->mr->rkey);
-    // concatenate the mr_control_start_pointer as a kv_addr_pair pointer
-    ControlMessage *key_value_pair = (ControlMessage *)
-            ptr_kv_handle->ctx->mr_send_start_ptr;
-    key_value_pair->operation = RENDEZVOUS_KV_SET_SERVER;
-    // remote va and remote key
-    *(uint64_t *) key_value_pair->buf = remote_buf_va;
-    *(uint32_t *) (key_value_pair->buf + sizeof(uint64_t)) = remote_buf_rkey;
-    // send the message and Wait for this send to finish
+    uint64_t remote_buf_va = bswap_64((uintptr_t)mr_rdma->mr_start_ptr);
+    uint32_t remote_buf_rkey = htonl(mr_rdma->mr->rkey);
+    const void *array_messages_address[2] = {&remote_buf_va, &remote_buf_rkey};
+    const size_t array_message_sizes[2] = {sizeof(uint64_t), sizeof(uint32_t)};
+    set_control_message(ptr_kv_handle, SERVER_KV_SET_RENDEZVOUS,
+                        array_messages_address, array_message_sizes, 2);
     pp_post_send(ptr_kv_handle->ctx);
     if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
         fprintf(stderr, "kv_set SERVER: cannot send message\n");
         return 1;
     }
+
     /// insert the result to local database
     KeyValueAddressPair entry = {local_key_address, local_value_address,
-                                 value_size, mr_rdma_write};
+                                 value_length, mr_rdma};
     insert_array(database, &entry);
     return 0;
-
 }
 
 /**
@@ -345,27 +491,60 @@ int handle_RENDEZVOUS_KV_SET_KEY(KeyValueAddressArray *database,
  * @param ptr_control_message
  * @return
  */
-int handle_EAGER_KV_SET(KeyValueAddressArray *database, ControlMessage
-*ptr_control_message) {
-    // todo: check if resource busy!
-    // According to eager protocol: the buffer will contain key and value
-    char *control_message_buf = ptr_control_message->buf;
-    /// The key will be from the start address till first null terminator
-    char *buf_key_address = control_message_buf;
-    int key_length = strlen(buf_key_address) + 1;
-    char *local_key_address = malloc(key_length);
+int handle_EAGER_KV_SET(KeyValueAddressArray *database,
+                        ControlMessage *remote_control_message,
+                        KVHandle *ptr_kv_handle) {
+    /// decode the messages in remote control buffer
+    // It should contain key + value size + value
+    void *array_ptr_to_fill[3];
+    const size_t array_ptr_sizes[3] = {0, sizeof(size_t), 0};
+    decode_control_message_buffer(remote_control_message->buf,
+                                  array_ptr_to_fill,
+                                  array_ptr_sizes, 3);
+    char *buf_key_address = array_ptr_to_fill[0];
+    size_t *buf_value_length_address = array_ptr_to_fill[1];
+    char *buf_value_address = array_ptr_to_fill[2];
+
+    /// handle special cases: check if the resource is busy (if exists)
+    // get the corresponding key_val_pair in database
+    KeyValueAddressPair *get_kv_pair = get_KeyValueAddressPair(database,
+                                                               buf_key_address);
+    /// the key pair is in progress
+    if (get_kv_pair != NULL){
+        if (get_kv_pair->in_progress != NULL){
+            set_control_message(ptr_kv_handle, SERVER_IN_PROGRESS, NULL,
+                                NULL, 0);
+            pp_post_send(ptr_kv_handle->ctx);
+            if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+                fprintf(stderr, "handle_EAGER_KV_SET SERVER_IN_PROGRESS: cannot send message\n");
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+
+    /// Copy key and value from remote_control_message buffer to local
+    size_t key_length = strlen(buf_key_address) + 1;
+    char *local_key_address = malloc(key_length);   // freed in free_array
     strcpy(local_key_address, buf_key_address);
-    /// The value size will be right after key
-    char *buf_value_size_address = control_message_buf + key_length;
-    size_t value_size = *(size_t *) buf_value_size_address;
-    /// The value will be following right after value size
-    char *buf_value_address = buf_value_size_address + sizeof(size_t);
-    char *local_value_address = malloc(value_size);
+    size_t value_length = *(size_t*) buf_value_length_address;
+    char *local_value_address = malloc(value_length);   // freed in free_array
     strcpy(local_value_address, buf_value_address);
+
     /// insert the result to local database
     KeyValueAddressPair entry = {local_key_address, local_value_address,
-                                 value_size, NULL};
+                                 value_length, NULL};
     insert_array(database, &entry);
+
+    /// send confirmation message to user
+    set_control_message(ptr_kv_handle, SERVER_KV_SET_SUCCESSFUL, NULL,
+                        NULL, 0);
+    pp_post_send(ptr_kv_handle->ctx);
+    if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+        fprintf(stderr, "handle_EAGER_KV_SET SERVER_KV_SET_SUCCESSFUL: cannot send message\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -382,84 +561,180 @@ int handle_EAGER_KV_SET(KeyValueAddressArray *database, ControlMessage
  * @return
  */
 int kv_get(void *kv_handle, const char *key, char **var) {
-    /// First send a message containing the key
     KVHandle *ptr_kv_handle = (KVHandle *) kv_handle;
-    ControlMessage *key_value_pair = (ControlMessage *)
-            ptr_kv_handle->ctx->mr_send_start_ptr;
-    // We will just mem_copy to a registered memory region: mr_control
-    key_value_pair->operation = CLIENT_KV_GET;
-    strcpy(key_value_pair->buf, key);
-    // send the message and wait for the send to finish
+    /// First send a message containing the key
+    size_t key_size = strlen(key) + 1;
+    const void *array_messages_address[1] = {key};
+    const size_t array_message_sizes[1] = {key_size};
+    set_control_message(ptr_kv_handle, CLIENT_KV_GET, array_messages_address,
+                        array_message_sizes, 1);
     pp_post_send(ptr_kv_handle->ctx);
     if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
         fprintf(stderr, "kv_get CLIENT_KV_GET: cannot send message\n");
         return 1;
     }
-    /// poll 1 receive wc from receive cq: get one response from server
-    int array_mr_ids[1];
-    if (poll_n_receive_wc(ptr_kv_handle->ctx, 1, array_mr_ids)) {
-        fprintf(stderr, "kv_get CLIENT_KV_GET: didn't receive message\n");
-        return 1;
-    }
-    // check which receive buffer got the response
-    int mr_id = array_mr_ids[0];
-    // make it a pointer because we need to set mr status to FREE later
-    struct MRInfo *mr_receive_info =
-            ptr_kv_handle->ctx->array_mr_receive_info + mr_id;
-    // cast the memory region in form of struct Control message
-    ControlMessage *control_message = (ControlMessage *)
-            mr_receive_info->mr_start_ptr;
 
-    /// Handle the response
-    if (control_message->operation == SERVER_KV_GET_EAGER) {
-        // According to eager protocol, the value should be inside the buffer.
-        char *buffer_value_address = control_message->buf;
-        size_t value_length = strlen(buffer_value_address) + 1;
-        char *local_value_address = malloc(value_length);
-        // mem copy to where the value is
-        strcpy(local_value_address, buffer_value_address);
-        // assign this address to var
-        *var = local_value_address;
+    /// get one response from server
+    ControlMessage *remote_control_message;
+    get_remote_control_message(ptr_kv_handle, &remote_control_message);
+
+    if (remote_control_message->operation == SERVER_KV_GET_EAGER) {
+        /// decode the response: result should contain just the value
+        void *array_ptr_to_fill[1];
+        const size_t array_ptr_sizes[1] = {0};
+        decode_control_message_buffer(remote_control_message->buf,
+                                      array_ptr_to_fill,
+                                      array_ptr_sizes, 1);
+        char *buf_value_address = array_ptr_to_fill[0];
+        // store to local buffer
+        *var = malloc(strlen(buf_value_address) + 1);   // freed in kv_release
+        strcpy(*var, buf_value_address);
         return 0;
-    } else if (control_message->operation == SERVER_KV_GET_RENDEZVOUS) {
+    } else if (remote_control_message->operation == SERVER_KV_GET_RENDEZVOUS) {
+        /// decode remote control message
+        // should be value size + remote va and remote key
+        void *array_ptr_to_fill[3];
+        const size_t array_ptr_sizes[3] = {sizeof(size_t),
+                                           sizeof(uint64_t),
+                                           sizeof(uint32_t)};
+        decode_control_message_buffer(remote_control_message->buf,
+                                      array_ptr_to_fill,
+                                      array_ptr_sizes, 3);
+        ptr_kv_handle->ctx->mr_rdma_size = *(size_t*) array_ptr_to_fill[0];
+        ptr_kv_handle->ctx->remote_buf_va = *(uint64_t*)array_ptr_to_fill[1];
+        ptr_kv_handle->ctx->remote_buf_rkey = *(uint32_t *)
+                array_ptr_to_fill[2];
 
-    } else if (control_message->operation == SERVER_KV_GET_KEY_NOT_FOUND){
-        fprintf(stderr, "kv_get: SERVER_KV_GET key not found! \n");
-        return 1;
+        /// temporarily register the address of the value as a memory region.
+        *var = malloc(ptr_kv_handle->ctx->mr_rdma_size);// freed in kv_release
+        ptr_kv_handle->ctx->mr_rdma_start_ptr = (void *) *var;
+        ptr_kv_handle->ctx->mr_rdma = ibv_reg_mr(ptr_kv_handle->ctx->pd,
+                                                 ptr_kv_handle->ctx->mr_rdma_start_ptr,
+                                                 ptr_kv_handle->ctx->mr_rdma_size,
+                                                 IBV_ACCESS_LOCAL_WRITE);
+
+        /// RDMA READ to server
+        pp_post_rdma(ptr_kv_handle->ctx, IBV_WR_RDMA_READ);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "kv_get client RDMA_READ: cannot send message\n");
+            return 1;
+        }
+
+        /// Write FIN to server
+        // should specify which key
+        const void *array_messages_address_1[1] = {key};
+        const size_t array_message_sizes_1[1] = {key_size};
+        set_control_message(ptr_kv_handle, CLIENT_RENDEZVOUS_FIN,
+                            array_messages_address_1,
+                            array_message_sizes_1, 1);
+        pp_post_send(ptr_kv_handle->ctx);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "kv_set KV_SET_FIN: cannot send message\n");
+            return 1;
+        }
+
+        /// Finally deregister the mr
+        if (ibv_dereg_mr(ptr_kv_handle->ctx->mr_rdma)) {
+            fprintf(stderr, "Couldn't deregister MR_control_send\n");
+            return 1;
+        }
+
+        ptr_kv_handle->ctx->mr_rdma_start_ptr = NULL;
+        ptr_kv_handle->ctx->mr_rdma_size = 0;
     }else {
-        // todo: add could be resource busy
+        *var = NULL;
         fprintf(stderr, "kv_get: SERVER_KV_GET something went wrong\n");
         return 1;
     }
-    /// Free resources in my responsibility
-    // free the receive mr so we can post receive again
-    mr_receive_info->mr_status = FREE;
+
 }
 
 int handle_CLIENT_KV_GET(KeyValueAddressArray *database, ControlMessage
-*ptr_control_message, KVHandle *ptr_kv_handle) {
-    // todo: check resource busy!
-    // According to protocol: the buffer will contain key
-    char *control_message_buf = ptr_control_message->buf;
-    // The key will be from the start address till first null terminator
-    char *buf_key_address = control_message_buf;
+*remote_control_message, KVHandle *ptr_kv_handle) {
+    /// decode the messages in remote control buffer
+    // It should contain key
+    void *array_ptr_to_fill[1];
+    const size_t array_ptr_sizes[1] = {0};
+    decode_control_message_buffer(remote_control_message->buf,
+                                  array_ptr_to_fill,
+                                  array_ptr_sizes, 1);
+    char *buf_key_address = array_ptr_to_fill[0];
+
+    /// handle special cases
     // get the corresponding key_val_pair in database
     KeyValueAddressPair *get_kv_pair = get_KeyValueAddressPair(database,
                                                                buf_key_address);
-    // todo: if didn't exist in database: send another opcode
-    if (get_kv_pair->value_size < CONTROL_MESSAGE_BUFFER_SIZE) {
-        /// We will send the value directly
-        ControlMessage *key_value_pair = (ControlMessage *)
-                ptr_kv_handle->ctx->mr_send_start_ptr;
-        // We will just mem_copy to a registered memory region: mr_control
-        key_value_pair->operation = SERVER_KV_GET_EAGER;
-        strcpy(key_value_pair->buf, get_kv_pair->value_address);
-        // send the message and wait for the send to finish
+    /// the key is not found
+    if (get_kv_pair == NULL){
+        set_control_message(ptr_kv_handle, SERVER_KV_GET_KEY_NOT_FOUND, NULL,
+                            NULL, 0);
         pp_post_send(ptr_kv_handle->ctx);
         if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
-            fprintf(stderr, "_handle_client_kv_get: cannot send message\n");
+            fprintf(stderr, "handle_CLIENT_KV_GET SERVER_KV_GET_KEY_NOT_FOUND: cannot send message\n");
             return 1;
         }
+        return 0;
+    }
+    /// the key pair is in progress
+    if (get_kv_pair->in_progress != NULL){
+        set_control_message(ptr_kv_handle, SERVER_IN_PROGRESS, NULL,
+                            NULL, 0);
+        pp_post_send(ptr_kv_handle->ctx);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "handle_CLIENT_KV_GET SERVER_IN_PROGRESS: cannot send message\n");
+            return 1;
+        }
+        return 0;
+    }
+
+    /// if there is no special cases
+    if (get_kv_pair->value_size < CONTROL_MESSAGE_BUFFER_SIZE) {
+        /// We will send the buffer contains just the value
+        size_t value_size = strlen(get_kv_pair->value_address) + 1;
+        const void *array_messages_address[1] = {get_kv_pair->value_address};
+        const size_t array_message_sizes[1] = {value_size};
+        set_control_message(ptr_kv_handle, SERVER_KV_GET_EAGER,
+                            array_messages_address,
+                            array_message_sizes, 1);
+        pp_post_send(ptr_kv_handle->ctx);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "handle_CLIENT_KV_GET EAGER: cannot send message\n");
+            return 1;
+        }
+        return 0;
+    }else{
+        /// Register the memory of value for client to rdma read
+        char *local_value_address = get_kv_pair->value_address;
+        struct pingpong_context *ctx = ptr_kv_handle->ctx;
+        struct MRInfo *mr_rdma = malloc(sizeof(struct MRInfo)); // freed in handle_CLIENT_RENDEZVOUS_FIN
+        mr_rdma->mr_start_ptr = (void *) (local_value_address);
+        mr_rdma->mr_status = RDMA;
+        mr_rdma->mr_size = get_kv_pair->value_size;
+        mr_rdma->mr = ibv_reg_mr(ctx->pd,
+                                 mr_rdma->mr_start_ptr,
+                                 mr_rdma->mr_size,
+                                       IBV_ACCESS_LOCAL_WRITE|
+                                       IBV_ACCESS_REMOTE_READ);
+
+        /// Send the value size + remote virtual addr + remote key to client
+        uint64_t remote_buf_va = bswap_64((uintptr_t)mr_rdma->mr_start_ptr);
+        uint32_t remote_buf_rkey = htonl(mr_rdma->mr->rkey);
+        const void *array_messages_address[3] = {&get_kv_pair->value_size,
+                                                 &remote_buf_va,
+                                                 &remote_buf_rkey};
+        const size_t array_message_sizes[3] = {sizeof(size_t),
+                                               sizeof(uint64_t),
+                                               sizeof(uint32_t)};
+        set_control_message(ptr_kv_handle, SERVER_KV_GET_RENDEZVOUS,
+                            array_messages_address, array_message_sizes, 3);
+        pp_post_send(ptr_kv_handle->ctx);
+        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+            fprintf(stderr, "kv_set SERVER: cannot send message\n");
+            return 1;
+        }
+
+        /// update the key_pair status
+        get_kv_pair->in_progress = mr_rdma;
         return 0;
     }
 }
@@ -488,7 +763,6 @@ void kv_release(char *value) {
 
 /**
  * Server will just run this function, and respond to the clients requests
- * todo: handle the free resource here!!!
  * @return
  */
 int run_server(KVHandle *ptr_kv_handle) {
@@ -496,44 +770,46 @@ int run_server(KVHandle *ptr_kv_handle) {
     KeyValueAddressArray *database = initialize_KeyValueAddressArray(20);
 
     while (1) {
-        /// poll 1 receive wc from receive cq: get one response from server
-        int array_mr_ids[1];
-        if (poll_n_receive_wc(ptr_kv_handle->ctx, 1, array_mr_ids)) {
-            fprintf(stderr, "kv_get CLIENT_KV_GET: didn't receive message\n");
-            return 1;
-        }
-        // check which receive buffer got the response
-        int mr_id = array_mr_ids[0];
-        // make it a pointer because we need to set mr status to FREE later
-        struct MRInfo *mr_receive_info =
-                ptr_kv_handle->ctx->array_mr_receive_info + mr_id;
-        // cast the memory region in form of struct Control message
-        ControlMessage *control_message = (ControlMessage *)
-                mr_receive_info->mr_start_ptr;
-
+        // todo: handle get remoste control message fail case
+        ControlMessage *remote_control_message = NULL;
+        get_remote_control_message(ptr_kv_handle, &remote_control_message);
 
         /// handle it
         // if we get a message from any client to tell us finish experiment
-        if (control_message->operation == SHUT_DOWN_SERVER) {
+        if (remote_control_message->operation == SHUT_DOWN_SERVER) {
+            printf("shutting down!\n");
             break;
         }
         // eager kv_set
-        if (control_message->operation == EAGER_KV_SET) {
-            handle_EAGER_KV_SET(database, control_message);
-        }
-        // kv_get: CLIENT_KV_GET
-        if (control_message->operation == CLIENT_KV_GET) {
-            handle_CLIENT_KV_GET(database, control_message, ptr_kv_handle);
+        else if (remote_control_message->operation == CLIENT_KV_SET_EAGER) {
+            printf("run_server CLIENT_KV_SET_EAGER!\n");
+
+            handle_EAGER_KV_SET(database, remote_control_message,
+                                ptr_kv_handle);
         }
         // rdma_kv_set client send key
-        if (control_message->operation == RENDEZVOUS_KV_SET_KEY) {
-            handle_RENDEZVOUS_KV_SET_KEY(database, control_message,
+        else if (remote_control_message->operation == CLIENT_KV_SET_RENDEZVOUS) {
+            handle_RENDEZVOUS_KV_SET_KEY(database, remote_control_message,
                                          ptr_kv_handle);
-        }
-        /// Finish handling this receive, this region can be post receive again
-        mr_receive_info->mr_status = FREE;
+            printf("run_server CLIENT_KV_SET_RENDEZVOUS!\n");
 
-        /// for testing: see how many value are set
+        }
+        else if (remote_control_message->operation == CLIENT_RENDEZVOUS_FIN){
+            handle_CLIENT_RENDEZVOUS_FIN(database, remote_control_message);
+            printf("run_server CLIENT_RENDEZVOUS_FIN!\n");
+
+        }
+        // kv_get: CLIENT_KV_GET
+        else if (remote_control_message->operation == CLIENT_KV_GET) {
+            handle_CLIENT_KV_GET(database, remote_control_message, ptr_kv_handle);
+            printf("run_server CLIENT_KV_GET!\n");
+        }
+
+        else{
+            fprintf(stderr, "run server: unknown operation!\n");
+            break;
+        }
+        /// for testing: todo: to delete
         print_dynamic_array(database);
     }
 
