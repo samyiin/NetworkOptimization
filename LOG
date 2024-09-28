@@ -13,7 +13,7 @@ different set of parameters.)
 
 How many times of copy? See group
 
-max_inline? Get it from QP, and then if message size < max_inline, we will send it by in line
+Added: max_inline? Get it from QP, and then if message size < max_inline, we will send it by in line
 
 need to look into what is a channel in ibv_create_comp_channel, and it's something relates to Host Channel Adapter.
 And also, I understand what is a QP, but in which physical existence is it?
@@ -46,3 +46,9 @@ incomplete wc, need to handle such situation.
 
 in dynamic array, insert array, if the key exists, then we will just update the value, and not update the key, and we will free the key of new entry.
 But if the key of new entry and the key of original entry is the same key, (they are pointing to the same address,
+
+start modifying qp, what is qpn? how to ensure exclusivity? what about protection domain?
+
+separate the two parts of set: EAGER and RENDEZVOUS both have only two parts, so we can do it like this.
+
+We don't need multiple memory region because we will create different cq for each client? No we don't......

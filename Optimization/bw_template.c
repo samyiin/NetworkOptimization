@@ -148,7 +148,7 @@ struct pingpong_context {
     struct ibv_context		*context;
     struct ibv_comp_channel	*channel;
     struct ibv_pd		*pd;
-    struct ibv_mr		*mr_control;
+    struct ibv_mr		*mr_control_send;
     struct ibv_mr       *mr_rdma_write;
     struct ibv_cq		*cq;
     struct ibv_qp		*qp;
@@ -675,8 +675,8 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev,
     }
 
     // register mr: this mr is for control messages
-    ctx->mr_control = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_LOCAL_WRITE);
-    if (!ctx->mr_control) {
+    ctx->mr_control_send = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_LOCAL_WRITE);
+    if (!ctx->mr_control_send) {
         fprintf(stderr, "Couldn't register MR\n");
         return NULL;
     }
@@ -768,7 +768,7 @@ static int pp_close_ctx(struct pingpong_context *ctx){
         return 1;
     }
 
-    if (ibv_dereg_mr(ctx->mr_control)) {
+    if (ibv_dereg_mr(ctx->mr_control_send)) {
         fprintf(stderr, "Couldn't deregister MR_control\n");
         return 1;
     }
@@ -824,7 +824,7 @@ static int pp_post_recv(struct pingpong_context *ctx, int n){
             .addr	= (uintptr_t) ctx->buf,
             // Here it is how much data you are expected to receive
             .length = ctx->size,
-            .lkey	= ctx->mr_control->lkey
+            .lkey	= ctx->mr_control_send->lkey
     };
     // work request
     struct ibv_recv_wr wr = {
@@ -903,7 +903,7 @@ static int pp_post_send(struct pingpong_context *ctx){
     struct ibv_sge list = {
             .addr	= (uint64_t)ctx->buf,
             .length = ctx->size,
-            .lkey	= ctx->mr_control->lkey     // lkey: local key for local MR
+            .lkey	= ctx->mr_control_send->lkey     // lkey: local key for local MR
     };
     unsigned int flags = IBV_SEND_SIGNALED;
     if (ctx->size <= max_inline){

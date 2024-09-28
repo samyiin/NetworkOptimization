@@ -68,8 +68,9 @@ extern int page_size;
  * Work request id, in our exercise not really important.....
  */
 enum {
-    PINGPONG_SEND_WRID = -1,
-    PINGPONG_WRITE_WRID = -2,
+    PINGPONG_SEND_WRID = 1,
+    PINGPONG_WRITE_WRID = 2,
+    PINGPONG_RECEIVE_WRID = 3,
 };
 
 /**
@@ -108,11 +109,11 @@ struct MRInfo{
  * routs            how many rounds of iteration in the pingpong test
  * portinfo         information of the port (port state, MTU, other config)
  * ==========================================================================
- * mr_control                   memory region for control message
- * mr_control_start_ptr         ptr to the buffer of mr_control
+ * mr_control_send                   memory region for control message
+ * mr_control_send_start_ptr         ptr to the buffer of mr_control_send
  * mr_rdma_write                memory region for rdma writemr_receive
  * mr_rdma_write_start_ptr      ptr to the buffer of mr_rdma_write
- * mr_control_size              size of control message
+ * mr_control_send_size              size of control message
  * mr_rdma_write_size           size of rdma_write message
  * ==========================================================================
  * remote_buf_va                the virtual address of remote buffer
@@ -131,15 +132,18 @@ struct pingpong_context {
 
     // control messages (send and receive)
     struct ibv_mr		        *mr_control_send;
-    void                        *mr_send_start_ptr;
-    int                         mr_control_size;
+    void                        *mr_control_send_start_ptr;
+    int                         mr_control_send_size;
 
     // control messages receive
     struct MRInfo               *array_mr_receive_info;
+    struct ibv_mr		        *mr_control_receive;
+    void                        *mr_control_receive_start_ptr;
+    int                         mr_control_receive_size;
     int				            rx_depth;
     int				            routs;
 
-    // RDMA context (read and write)
+    // temporary RDMA context (read and write) (Used to post send)
     struct ibv_mr		        *mr_rdma;
     void                        *mr_rdma_start_ptr;
     size_t                      mr_rdma_size;
@@ -201,7 +205,6 @@ int pp_post_rdma(struct pingpong_context *ctx, enum ibv_wr_opcode opcode);
 
 int poll_n_send_wc(struct pingpong_context *ctx, int n_complete);
 
-int poll_n_receive_wc(struct pingpong_context *ctx, int n_complete, int
-*array_mr_id);
+int poll_next_receive_wc(struct pingpong_context *ctx, int blocking);
 
 #endif //NETWORKOPTIMIZATION_IB_FUNCTIONS_H
