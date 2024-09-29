@@ -17,7 +17,8 @@
 # define PORT 8080
 # define END_MESSAGE "z" // this is a string, char*, because it's easier this way to send message.
 # define BUFFER_SIZE 2 * 1048576
-# define NUM_OF_MESSAGES 10000
+# define NUM_OF_MESSAGES 1024
+#define NUM_OF_WARMUP 500
 
 void measure_throughput(int const sock, int const num_experiments, int const warmup) {
 	int message_size = 1;
@@ -69,7 +70,7 @@ void measure_throughput(int const sock, int const num_experiments, int const war
 	}
 }
 
-void measure_latency(int const sock, int const warmup) {
+void measure_latency(int const sock, int const warmup, int num_messages) {
 	// We will send an END_MESSAGE, receive a result, repeat NUM_OF_MESSAGES times. measure the RTT
 	// Latency will be measured by RTT/(NUM_OF_MESSAGES*2)
 	// regarding choice of the size of message? I choose to send the smallest message because it should be the fastest.
@@ -78,7 +79,7 @@ void measure_latency(int const sock, int const warmup) {
 	struct timeval start, end;
 	gettimeofday(&start, NULL);
 
-	for (int i = 0; i < NUM_OF_MESSAGES; i++) {
+	for (int i = 0; i < num_messages; i++) {
 		// send single message
 		// Notice, message_size = 1 means I am only sending 'z', I am not sending the null terminator of the string.
 		send(sock, END_MESSAGE, 1, 0);
@@ -162,13 +163,13 @@ int main(int const argc, char const *argv[]) {
 
 
     // warm up cycle (each warmup cycle takes NUM_OF_MESSAGES round trips)
-	measure_latency(client_socket, 1);
+	measure_latency(client_socket, 1, NUM_OF_WARMUP);
 
 	// actual trails
 	measure_throughput(client_socket, 21, 0);
 
 	// actual trails: if we don't want to print, we can put warmup=0
-	measure_latency(client_socket, 0);
+	measure_latency(client_socket, 0, NUM_OF_MESSAGES);
 
     // close socket: frees up descriptor, for TCP: send the FIN packet.
     close(client_socket);

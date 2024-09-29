@@ -98,6 +98,7 @@
  * time to perform the test, so we should find a sweet spot
  */
 #define NUMBER_MESSAGES 5000
+#define NUM_OF_WARMUP 500
 
 /*
  * mtu will affect how many packets we will send for each message. depends
@@ -1527,7 +1528,7 @@ int main(int argc, char *argv[])
      * each warmup cycle takes NUM_OF_MESSAGES=iters round trips
      */
     int warmup = 1;
-    latency_test(servername, warmup, ctx, iters);
+    latency_test(servername, warmup, ctx, NUM_OF_WARMUP);
 
     /*
      * throughput test
@@ -1535,10 +1536,10 @@ int main(int argc, char *argv[])
     warmup = 0;
     throughput_test(servername, warmup, ctx, tx_depth, iters, rem_dest);
 
-//    /*
-//     * Latency test
-//     */
-//    latency_test(servername, warmup, ctx, iters);
+    /*
+     * Latency test
+     */
+    latency_test(servername, warmup, ctx, iters);
 
     /*
      * Free everything

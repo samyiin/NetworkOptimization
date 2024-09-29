@@ -41,7 +41,8 @@ enum Operation{
     SERVER_KV_GET_KEY_NOT_FOUND = 6,
     SERVER_IN_PROGRESS = 7,
 
-    CLIENT_RENDEZVOUS_FIN = 8,
+    CLIENT_KV_GET_RENDEZVOUS_FIN = 8,
+    CLIENT_KV_SET_RENDEZVOUS_FIN = 9,
     SERVER_KV_SET_SUCCESSFUL = 10,
 };
 
@@ -163,8 +164,14 @@ operation, const void **array_messages_address){
         messages_sizes[1] = sizeof(uint64_t);
         messages_sizes[2] =sizeof(uint32_t);
 
-    }else if (operation == CLIENT_RENDEZVOUS_FIN){
-        /// CLIENT_RENDEZVOUS_FIN: key
+    }else if (operation == CLIENT_KV_GET_RENDEZVOUS_FIN){
+        /// CLIENT_KV_GET_RENDEZVOUS_FIN: key
+        array_size = 1;
+        size_t key_size = strlen(array_messages_address[0]) + 1;
+        messages_sizes[0] = key_size;
+
+    }else if (operation == CLIENT_KV_SET_RENDEZVOUS_FIN){
+        /// CLIENT_KV_GET_RENDEZVOUS_FIN: key
         array_size = 1;
         size_t key_size = strlen(array_messages_address[0]) + 1;
         messages_sizes[0] = key_size;
@@ -226,8 +233,13 @@ static int decode_control_message_buffer(enum Operation operation,
         messages_sizes[1] = sizeof(uint64_t);
         messages_sizes[2] =sizeof(uint32_t);
 
-    }else if (operation == CLIENT_RENDEZVOUS_FIN){
-        /// CLIENT_RENDEZVOUS_FIN: key
+    }else if (operation == CLIENT_KV_GET_RENDEZVOUS_FIN){
+        /// CLIENT_KV_GET_RENDEZVOUS_FIN: key
+        array_size = 1;
+        messages_sizes[0] = 0;
+
+    }else if (operation == CLIENT_KV_SET_RENDEZVOUS_FIN){
+        /// CLIENT_KV_GET_RENDEZVOUS_FIN: key
         array_size = 1;
         messages_sizes[0] = 0;
 
