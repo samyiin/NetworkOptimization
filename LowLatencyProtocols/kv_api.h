@@ -20,6 +20,11 @@
 #define TX_DEPTH 100
 #define RX_DEPTH 100
 
+
+/// The number of clients
+#define NUM_CLIENTS 2
+
+
 /**
  * The performed operation
  */
@@ -47,29 +52,28 @@ typedef struct KVHandle{
     struct ibv_device      **dev_list;
     struct ibv_device       *ib_dev;
     struct pingpong_context *ctx;
-    struct pingpong_dest     my_dest;
+    struct pingpong_dest    my_dest;
     struct pingpong_dest    *rem_dest;
     char                    *ib_devname;
-    int                      port;
-    int                      ib_port;
-    enum ibv_mtu             mtu;// mtu
-    int                      rx_depth;           // The length of receive queue
-    int                      tx_depth;           // The length of send queue
-    int                      use_event;          // poll CQ or not
+    int                     port;
+    int                     ib_port;
+    enum ibv_mtu            mtu;// mtu
+    int                     rx_depth;           // The length of receive queue
+    int                     tx_depth;           // The length of send queue
+    int                     use_event;          // poll CQ or not
     // buffer size for control message
-    int                      mr_control_size;
+    int                     mr_control_size;
     // buffer size for RDMA Write (This will only be initialized when needed
     int                      mr_rdma_write_size;
-    int                      sl;                   // service level
+    int                     sl;                   // service level
     // the gid index: if set to -1 then we will set gid to 0, else, we will
     // actually query gid for the local device
-    int                      gidx;
+    int                     gidx;
     // empty buffer for inet_ntop to store the my_dest.gid, later for printing.
-    char                     gid[33];
-    // map key to value + temporary registered mr for rdma
-    struct KeyValueAddressArray *database;
-    // kv_set option. 0: we only send first message and done. 1: we do until
-    // end
+    char                    gid[33];
+    int                     num_remote_host;
+    struct pingpong_context **array_ctx_ptr;
+    struct pingpong_dest    **array_remote_dest;
 }KVHandle;
 
 typedef struct ControlMessage{

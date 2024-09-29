@@ -9,19 +9,19 @@
  */
 int kv_open(char *servername, void **kv_handle) {
     /// Initialize KV handle
-    KVHandle *my_kv_handle = malloc(sizeof(KVHandle));  // freed in kv_close
-    my_kv_handle->ib_devname = NULL;
-    my_kv_handle->port = 12345;
-    my_kv_handle->ib_port = 1;
-    my_kv_handle->mtu = pp_mtu_to_enum(MTU);
-    my_kv_handle->rx_depth = RX_DEPTH;
-    my_kv_handle->tx_depth = TX_DEPTH;
-    my_kv_handle->use_event = 0;
-    my_kv_handle->mr_control_size = sizeof(ControlMessage);
-    my_kv_handle->sl = 0;
-    my_kv_handle->gidx = -1;
-    /// record the address where my_kv_handle points to
-    *kv_handle = my_kv_handle;
+    KVHandle *ptr_kv_handle = malloc(sizeof(KVHandle));  // freed in kv_close
+    ptr_kv_handle->ib_devname = NULL;
+    ptr_kv_handle->port = 12345;
+    ptr_kv_handle->ib_port = 1;
+    ptr_kv_handle->mtu = pp_mtu_to_enum(MTU);
+    ptr_kv_handle->rx_depth = RX_DEPTH;
+    ptr_kv_handle->tx_depth = TX_DEPTH;
+    ptr_kv_handle->use_event = 0;
+    ptr_kv_handle->mr_control_size = sizeof(ControlMessage);
+    ptr_kv_handle->sl = 0;
+    ptr_kv_handle->gidx = -1;
+    /// record the address where ptr_kv_handle points to
+    *kv_handle = ptr_kv_handle;
 
 
     /// Set up the random generator
@@ -35,154 +35,193 @@ int kv_open(char *servername, void **kv_handle) {
      * If yes then get the first device that has a device name
      * and then Initialize the device.
      */
-    my_kv_handle->dev_list = ibv_get_device_list(NULL);
-    if (!my_kv_handle->dev_list) {
+    ptr_kv_handle->dev_list = ibv_get_device_list(NULL);
+    if (!ptr_kv_handle->dev_list) {
         perror("Failed to get IB devices list");
         return 1;
     }
 
-    if (!my_kv_handle->ib_devname) {
-        my_kv_handle->ib_dev = *(my_kv_handle->dev_list);
-        if (!my_kv_handle->ib_dev) {
+    if (!ptr_kv_handle->ib_devname) {
+        ptr_kv_handle->ib_dev = *(ptr_kv_handle->dev_list);
+        if (!ptr_kv_handle->ib_dev) {
             fprintf(stderr, "No IB devices found\n");
             return 1;
         }
     } else {
         int i;
-        for (i = 0; my_kv_handle->dev_list[i]; ++i)
-            if (!strcmp(ibv_get_device_name(my_kv_handle->dev_list[i]),
-                        my_kv_handle->ib_devname))
+        for (i = 0; ptr_kv_handle->dev_list[i]; ++i)
+            if (!strcmp(ibv_get_device_name(ptr_kv_handle->dev_list[i]),
+                        ptr_kv_handle->ib_devname))
                 break;
-        my_kv_handle->ib_dev = my_kv_handle->dev_list[i];
-        if (!my_kv_handle->ib_dev) {
+        ptr_kv_handle->ib_dev = ptr_kv_handle->dev_list[i];
+        if (!ptr_kv_handle->ib_dev) {
             fprintf(stderr, "IB device %s not found\n",
-                    my_kv_handle->ib_devname);
+                    ptr_kv_handle->ib_devname);
             return 1;
         }
-    }
-    /// initialization: create the ctx
-    my_kv_handle->ctx = pp_init_ctx(my_kv_handle->ib_dev,
-                                    my_kv_handle->mr_control_size,
-                                    my_kv_handle->rx_depth,
-                                    my_kv_handle->tx_depth,
-                                    my_kv_handle->ib_port,
-                                    my_kv_handle->use_event,
-                                    !servername);
-    if (!my_kv_handle->ctx)
-        return 1;
-
-    /**
-     * "Fill up" the receive queue with receive work requests
-     * If use_event means we will use channels to notify CQ when a task is done
-     */
-    // fill up the receive queue
-    if (pp_post_recv(my_kv_handle->ctx) == 0) {
-        my_kv_handle->ctx->routs = my_kv_handle->ctx->rx_depth;
-    } else {
-        fprintf(stderr, "kv_open Couldn't post receive (%d)\n",
-                my_kv_handle->ctx->routs);
-        return 1;
     }
 
-    if (my_kv_handle->use_event) {
-        if (ibv_req_notify_cq(my_kv_handle->ctx->send_cq, 0)) {
-            fprintf(stderr, "Couldn't request send_cq notification\n");
-            return 1;
-        }
-        if (ibv_req_notify_cq(my_kv_handle->ctx->receive_cq, 0)) {
-            fprintf(stderr, "Couldn't request receive_cq notification\n");
-            return 1;
-        }
+    int num_remote_host;
+    if (servername){
+        num_remote_host = 1;
+    } else{
+        num_remote_host = NUM_CLIENTS;
     }
+    ptr_kv_handle->num_remote_host = num_remote_host;
+
+    // todo: free this two + free remote dest in array_remote_dest
+    ptr_kv_handle->array_ctx_ptr = malloc(sizeof(struct pingpong_context*) *
+            num_remote_host);
+    ptr_kv_handle->array_remote_dest = malloc(sizeof(struct pingpong_dest*)
+            * num_remote_host);
+    int array_client_socket[num_remote_host];
 
 
     /**
-     * Get port info for the local infiniband device
-     * Make sure the local device is a infiniband device and it has a lid
-     * Get the gid of local device, if gidx > 0, else set my gid to 0.
-     * store the lid, gid, pqn, psn to a pingpong_dest struct called my_dest
-     * my_dest is the info for my node, remote_dest is for the node I am
-     * connecting to.
+     * If we are server, first wait for all the clients to setup, and send
+     * us their dest info, then we will start setting up and send back our
+     * info.
      */
-    if (pp_get_port_info(my_kv_handle->ctx->context,
-                         my_kv_handle->ib_port,
-                         &(my_kv_handle->ctx->portinfo))) {
-        fprintf(stderr, "Couldn't get port info\n");
-        return 1;
-    }
-
-    my_kv_handle->my_dest.lid = my_kv_handle->ctx->portinfo.lid;
-    if (my_kv_handle->ctx->portinfo.link_layer == IBV_LINK_LAYER_INFINIBAND &&
-        !my_kv_handle->my_dest.lid) {
-        fprintf(stderr, "Couldn't get local LID\n");
-        return 1;
-    }
-
-    if (my_kv_handle->gidx >= 0) {
-        if (ibv_query_gid(my_kv_handle->ctx->context, my_kv_handle->ib_port,
-                          my_kv_handle->gidx, &(my_kv_handle->my_dest.gid))) {
-            fprintf(stderr, "Could not get local gid for gid index %d\n",
-                    my_kv_handle->gidx);
+    if (!servername){
+        // first connect to all the clients with web sockets
+        printf("Waiting for %d clients to connect... \n", num_remote_host);
+        if (listen_to_websocket(ptr_kv_handle->port, array_client_socket,
+                                num_remote_host) != 0){
+            fprintf(stderr, "Could not establish socket connection\n");
             return 1;
         }
-    } else {
-        memset(&(my_kv_handle->my_dest.gid), 0,
-               sizeof my_kv_handle->my_dest.gid);
-    }
-
-    my_kv_handle->my_dest.qpn = my_kv_handle->ctx->qp->qp_num;
-    my_kv_handle->my_dest.psn = lrand48() & 0xffffff;
-    inet_ntop(AF_INET6, &(my_kv_handle->my_dest.gid), my_kv_handle->gid,
-              sizeof my_kv_handle->gid);
-
-    /*
-     * If servername is provided, then we are running main as a client, so
-     * we will exchange info with remote host using pp_client_exch_dest,
-     * else we are the server, so we will exchange with pp_server_exch_dest
-     * todo: pp_server_exch_dest will block the process until the client
-     * connects to it.
-     */
-    if (servername) {
-        my_kv_handle->rem_dest = pp_client_exch_dest(servername,
-                                                     my_kv_handle->port,
-                                                     &(my_kv_handle->my_dest));
-    } else {
-        my_kv_handle->rem_dest = pp_server_exch_dest(my_kv_handle->ctx,
-                                                     my_kv_handle->ib_port,
-                                                     my_kv_handle->mtu,
-                                                     my_kv_handle->port,
-                                                     my_kv_handle->sl,
-                                                     &(my_kv_handle->my_dest),
-                                                     my_kv_handle->gidx);
+        printf("All %d clients to connected! \n", num_remote_host);
     }
 
 
-    if (!my_kv_handle->rem_dest) {
-        return 1;
-    }
 
 
-    inet_ntop(AF_INET6, &my_kv_handle->rem_dest->gid, my_kv_handle->gid,
-              sizeof my_kv_handle->gid);
-
-    /**
-     * If we are client, we will try to establish connection with the remote
-     * If we are server, we already pp_connect_ctx with remote during
-     * the pp_server_exch_dest above. But this will happen only after client
-     * make connection with the server, because the server will be blocked at
-     * pp_server_exch_dest until the client connect to it.
-     */
-    if (servername) {
-        if (pp_connect_ctx(my_kv_handle->ctx,
-                           my_kv_handle->ib_port,
-                           my_kv_handle->my_dest.psn,
-                           my_kv_handle->mtu,
-                           my_kv_handle->sl,
-                           my_kv_handle->rem_dest,
-                           my_kv_handle->gidx)) {
+    /// initialization: create the ctx for each client
+    for (int remote_host_id = 0; remote_host_id < num_remote_host; remote_host_id ++){
+        ptr_kv_handle->array_ctx_ptr[remote_host_id] = pp_init_ctx(ptr_kv_handle->ib_dev,
+                                                    ptr_kv_handle->mr_control_size,
+                                                    ptr_kv_handle->rx_depth,
+                                                    ptr_kv_handle->tx_depth,
+                                                    ptr_kv_handle->ib_port,
+                                                    ptr_kv_handle->use_event,
+                                                    !servername);
+        if (!ptr_kv_handle->array_ctx_ptr[remote_host_id]){
+            fprintf(stderr, "kv_open: pp_init_ctx failed\n");
             return 1;
         }
+
+        ptr_kv_handle->ctx = ptr_kv_handle->array_ctx_ptr[remote_host_id];
+
+        /*
+         * "Fill up" the receive queue with receive work requests
+         * If use_event means we will use channels to notify CQ when a task is done
+         * This feature is not used in our exercise
+         */
+        if (pp_post_recv(ptr_kv_handle->ctx) == 0) {
+            ptr_kv_handle->ctx->routs = ptr_kv_handle->ctx->rx_depth;
+        } else {
+            fprintf(stderr, "kv_open Couldn't post receive (%d)\n",
+                    ptr_kv_handle->ctx->routs);
+            return 1;
+        }
+
+        if (ptr_kv_handle->use_event) {
+            if (ibv_req_notify_cq(ptr_kv_handle->ctx->send_cq, 0)) {
+                fprintf(stderr, "Couldn't request send_cq notification\n");
+                return 1;
+            }
+            if (ibv_req_notify_cq(ptr_kv_handle->ctx->receive_cq, 0)) {
+                fprintf(stderr, "Couldn't request receive_cq notification\n");
+                return 1;
+            }
+        }
+        /**
+         * Get port info for the local infiniband device
+         * Make sure the local device is a infiniband device and it has a lid
+         * Get the gid of local device, if gidx > 0, else set my gid to 0.
+         * store the lid, gid, pqn, psn to a pingpong_dest struct called my_dest
+         * my_dest is the info for my node, remote_dest is for the node I am
+         * connecting to.
+         */
+        if (pp_get_port_info(ptr_kv_handle->ctx->context,
+                             ptr_kv_handle->ib_port,
+                             &(ptr_kv_handle->ctx->portinfo))) {
+            fprintf(stderr, "Couldn't get port info\n");
+            return 1;
+        }
+
+        ptr_kv_handle->my_dest.lid = ptr_kv_handle->ctx->portinfo.lid;
+        if (ptr_kv_handle->ctx->portinfo.link_layer == IBV_LINK_LAYER_INFINIBAND &&
+            !ptr_kv_handle->my_dest.lid) {
+            fprintf(stderr, "Couldn't get local LID\n");
+            return 1;
+        }
+
+        if (ptr_kv_handle->gidx >= 0) {
+            if (ibv_query_gid(ptr_kv_handle->ctx->context, ptr_kv_handle->ib_port,
+                              ptr_kv_handle->gidx, &(ptr_kv_handle->my_dest.gid))) {
+                fprintf(stderr, "Could not get local gid for gid index %d\n",
+                        ptr_kv_handle->gidx);
+                return 1;
+            }
+        } else {
+            memset(&(ptr_kv_handle->my_dest.gid), 0,
+                   sizeof ptr_kv_handle->my_dest.gid);
+        }
+
+        ptr_kv_handle->my_dest.qpn = ptr_kv_handle->ctx->qp->qp_num;
+        ptr_kv_handle->my_dest.psn = lrand48() & 0xffffff;
+        inet_ntop(AF_INET6, &(ptr_kv_handle->my_dest.gid), ptr_kv_handle->gid,
+                  sizeof ptr_kv_handle->gid);
+
+        /**
+         * If servername is provided, then we are running main as a client, so
+         * we will exchange info with remote host using pp_client_exch_dest,
+         * else we are the server, so we will exchange with pp_server_exch_dest
+         * connects to it.
+         */
+        if (servername) {
+            ptr_kv_handle->rem_dest = pp_client_exch_dest(servername,
+                                                          ptr_kv_handle->port,
+                                                          &(ptr_kv_handle->my_dest));
+        } else {
+            int connfd = array_client_socket[remote_host_id];
+            ptr_kv_handle->array_remote_dest [remote_host_id] = pp_server_exch_dest(ptr_kv_handle->ctx,
+                                                                    ptr_kv_handle->ib_port,
+                                                                    ptr_kv_handle->mtu,
+                                                                    connfd,
+                                                                    ptr_kv_handle->sl,
+                                                                    &(ptr_kv_handle->my_dest),
+                                                                    ptr_kv_handle->gidx);
+            ptr_kv_handle->rem_dest = ptr_kv_handle->array_remote_dest [remote_host_id];
+            if (!ptr_kv_handle->rem_dest) {
+                fprintf(stderr, "kv_open: didn't get rem_dest\n");
+                return 1;
+            }
+        }
+        /**
+         * If we are client, we will try to establish connection with the remote
+         * If we are server, we already pp_connect_ctx with remote during
+         * the pp_server_exch_dest above. But this will happen only after client
+         * make connection with the server, because the server will be blocked at
+         * pp_server_exch_dest until the client connect to it.
+         */
+        inet_ntop(AF_INET6, &ptr_kv_handle->rem_dest->gid, ptr_kv_handle->gid,
+                  sizeof ptr_kv_handle->gid);
+        if (servername) {
+            if (pp_connect_ctx(ptr_kv_handle->ctx,
+                               ptr_kv_handle->ib_port,
+                               ptr_kv_handle->my_dest.psn,
+                               ptr_kv_handle->mtu,
+                               ptr_kv_handle->sl,
+                               ptr_kv_handle->rem_dest,
+                               ptr_kv_handle->gidx)) {
+                return 1;
+            }
+        }
     }
+
+    return 0;
 }
 
 /**
@@ -196,8 +235,6 @@ int kv_open(char *servername, void **kv_handle) {
 int get_remote_control_message(KVHandle *ptr_kv_handle, ControlMessage
 **remote_control_message, int blocking){
     if (poll_next_receive_wc(ptr_kv_handle->ctx, blocking)) {
-        printf("1\n");
-
         return 1;
     }
     // check which receive buffer got the response
@@ -234,7 +271,6 @@ int kv_set(void *kv_handle, const char *key, const char *value) {
             fprintf(stderr, "kv_set EAGER: cannot send message\n");
             return 1;
         }
-        printf("client kv_set send message\n");
         /// blocking, see if there is a control message
         ControlMessage *remote_control_message;
         int polled_message = get_remote_control_message(ptr_kv_handle,
@@ -428,10 +464,16 @@ int kv_get(void *kv_handle, const char *key, char **var) {
 
         ptr_kv_handle->ctx->mr_rdma_start_ptr = NULL;
         ptr_kv_handle->ctx->mr_rdma_size = 0;
-    }else {
+    }else if (remote_control_message->operation == SERVER_IN_PROGRESS){
         /// probably SERVER_IN_PROGRESS, but we don't need to read it.
         *var = NULL;
-        fprintf(stderr, "kv_get: SERVER_KV_GET something went wrong\n");
+        fprintf(stderr, "This resource is busy \n");
+        return 1;
+    }
+    else{
+        /// probably Key doesn't exist
+        *var = NULL;
+        fprintf(stderr, "Key doesn't exist! \n");
         return 1;
     }
 
@@ -739,46 +781,59 @@ int run_server(KVHandle *ptr_kv_handle) {
     KeyValueAddressArray *database = initialize_KeyValueAddressArray(20);
 
     while (1) {
-        // no blocking, poll the next control message
-        ControlMessage *remote_control_message = NULL;
-        int poll_msg_success = get_remote_control_message(ptr_kv_handle,
-                                                          &remote_control_message,
-                                                          1);
-        if (poll_msg_success == 1){
-            /// we didn't see any new information
-            continue;
+        /// for each client, see if they send any messages
+        for (int i = 0; i < ptr_kv_handle->num_remote_host; i++){
+            /// switch to the context of this client
+            ptr_kv_handle->ctx = ptr_kv_handle->array_ctx_ptr[i];
+            // no blocking, poll the next control message
+            ControlMessage *remote_control_message = NULL;
+            int poll_msg_success = get_remote_control_message(ptr_kv_handle,
+                                                              &remote_control_message,
+                                                              0);
+            if (poll_msg_success == 1){
+                /// we didn't see any new information
+                continue;
+            }
+
+            /// handle it
+            // if we get a message from any client to tell us finish experiment
+            if (remote_control_message->operation == SHUT_DOWN_SERVER) {
+                printf("shutting down!\n");
+                // todo: need a break flag
+                break;
+            }
+                // eager kv_set
+            else if (remote_control_message->operation == CLIENT_KV_SET_EAGER) {
+                printf("run_server client %d CLIENT_KV_SET_EAGER!\n", i);
+                handle_EAGER_KV_SET(database, remote_control_message,
+                                    ptr_kv_handle);
+                /// for testing: todo: to delete
+                print_dynamic_array(database);
+            }
+                // rdma_kv_set client send key
+            else if (remote_control_message->operation == CLIENT_KV_SET_RENDEZVOUS) {
+                printf("run_server client %d CLIENT_KV_SET_RENDEZVOUS!\n", i);
+                handle_RENDEZVOUS_KV_SET_KEY(database, remote_control_message,
+                                             ptr_kv_handle);
+                /// for testing: todo: to delete
+                print_dynamic_array(database);
+
+            }
+            else if (remote_control_message->operation == CLIENT_RENDEZVOUS_FIN){
+                printf("run_server client %d CLIENT_RENDEZVOUS_FIN!\n", i);
+                handle_CLIENT_RENDEZVOUS_FIN(database, remote_control_message);
+                /// for testing: todo: to delete
+                print_dynamic_array(database);
+            }
+                // kv_get: CLIENT_KV_GET
+            else if (remote_control_message->operation == CLIENT_KV_GET) {
+                printf("run_server client %d CLIENT_KV_GET!\n", i);
+                handle_CLIENT_KV_GET(database, remote_control_message, ptr_kv_handle);
+                /// for testing: todo: to delete
+                print_dynamic_array(database);
+            }
         }
 
-        /// handle it
-        // if we get a message from any client to tell us finish experiment
-        if (remote_control_message->operation == SHUT_DOWN_SERVER) {
-            printf("shutting down!\n");
-            break;
-        }
-            // eager kv_set
-        else if (remote_control_message->operation == CLIENT_KV_SET_EAGER) {
-            printf("run_server CLIENT_KV_SET_EAGER!\n");
-            handle_EAGER_KV_SET(database, remote_control_message,
-                                ptr_kv_handle);
-        }
-            // rdma_kv_set client send key
-        else if (remote_control_message->operation == CLIENT_KV_SET_RENDEZVOUS) {
-            printf("run_server CLIENT_KV_SET_RENDEZVOUS!\n");
-            handle_RENDEZVOUS_KV_SET_KEY(database, remote_control_message,
-                                         ptr_kv_handle);
-
-        }
-        else if (remote_control_message->operation == CLIENT_RENDEZVOUS_FIN){
-            printf("run_server CLIENT_RENDEZVOUS_FIN!\n");
-            handle_CLIENT_RENDEZVOUS_FIN(database, remote_control_message);
-        }
-            // kv_get: CLIENT_KV_GET
-        else if (remote_control_message->operation == CLIENT_KV_GET) {
-            printf("run_server CLIENT_KV_GET!\n");
-            handle_CLIENT_KV_GET(database, remote_control_message, ptr_kv_handle);
-        }
-        /// for testing: todo: to delete
-        print_dynamic_array(database);
     }
 
     /// free the database and every allocated memory inside

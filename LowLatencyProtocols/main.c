@@ -9,7 +9,6 @@ int perform_eager_test(const char *servername, void *kv_handle){
         run_server(kv_handle);
     }else{
         char *my_value;
-        printf("client kv_set start\n");
         char *key1 = "key1", *value1 = "value1";
         kv_set(kv_handle, key1, value1);
         printf("Client: kv_set key: %s, value: %s\n", key1, value1);

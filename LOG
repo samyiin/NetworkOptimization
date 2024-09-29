@@ -51,4 +51,13 @@ start modifying qp, what is qpn? how to ensure exclusivity? what about protectio
 
 separate the two parts of set: EAGER and RENDEZVOUS both have only two parts, so we can do it like this.
 
-We don't need multiple memory region because we will create different cq for each client? No we don't......
+We don't need multiple memory region because we will create different cq for each client. But for a sigle client and multiple messages, it will
+override this memory region. But since we are handling one request of a client at a time and only get to next when we finish using the memory region,
+so I guess that is ok. 
+This means we cannot have multiple outstanding requests for one client, we can have multiple out standing requestst for multiple clients at one time.
+It would be too complex to achieve multiple oustanding requests for one client anyways: because if we are setting the same key, one time with eager
+and the second time with rendezvous, then we will need a unique id for each time, so that when the server response we would know which one is the
+server responding to. Let's say we implemented a unique id for each request, now the second problem is how to fit this into the kv_set() api with
+single thread process. Because we need to separate each stage of set into a function, so that when the server respond we would know what to do. Or we
+can just separate kv_set into code snippets that select which part to execute base on the info we passed to kv_handle. I don't think this is what the
+exercise want us to do. So therefore I guess the "outstanding requests" means outstanding requests between multiple clients.

@@ -186,6 +186,7 @@ int pp_connect_ctx(struct pingpong_context *ctx, int port, int
 struct pingpong_dest *pp_client_exch_dest(const char *servername, int
         port, const struct pingpong_dest *my_dest);
 
+int listen_to_websocket(int port, int *client_socket_fds, int client_number);
 
 struct pingpong_dest *pp_server_exch_dest(struct pingpong_context
         *ctx, int ib_port, enum ibv_mtu mtu, int port, int sl, const struct

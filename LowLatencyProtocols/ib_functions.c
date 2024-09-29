@@ -307,32 +307,11 @@ port,
     return rem_dest;
 }
 
-/**
- * This function serves basically the same purpose as above. It's the server
- * receiving the info from the client and then respond to the client the
- * server's info.
- *
- * So here the first part, establishing TCP connection, server listen
- * and accept. And if there is no connection yet, the accept will block the
- * process.
- *
- * Then the second part, exchange info, server first get info from
- * client, and then send server info to client.
- *
- * @param ctx
- * @param ib_port
- * @param mtu
- * @param port
- * @param sl
- * @param my_dest
- * @param sgid_idx
- * @return
- */
-struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
-                                          int ib_port, enum ibv_mtu mtu,
-                                          int port, int sl,
-                                          const struct pingpong_dest *my_dest,
-                                          int sgid_idx) {
+
+int listen_to_websocket(int port, int *client_socket_fds, int client_number){
+    /**
+     * The first part is just to use web sockets to listen to remote host.
+     */
     struct addrinfo *res, *t;
     struct addrinfo hints = {
             .ai_flags    = AI_PASSIVE,
@@ -342,17 +321,16 @@ struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     char *service;
     int n;
     int sockfd = -1, connfd;
-    struct pingpong_dest *rem_dest = NULL;
 
     if (asprintf(&service, "%d", port) < 0)
-        return NULL;
+        return -1;
 
     n = getaddrinfo(NULL, service, &hints, &res);
 
     if (n < 0) {
         fprintf(stderr, "%s for port %d\n", gai_strerror(n), port);
         free(service);
-        return NULL;
+        return -1;
     }
 
     for (t = res; t; t = t->ai_next) {
@@ -374,19 +352,63 @@ struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
 
     if (sockfd < 0) {
         fprintf(stderr, "Couldn't listen to port %d\n", port);
-        return NULL;
+        return -1;
     }
 
-    listen(sockfd, 1);
-    connfd = accept(sockfd, NULL, 0);
-    close(sockfd);
-    if (connfd < 0) {
-        fprintf(stderr, "accept() failed\n");
-        return NULL;
+    listen(sockfd, client_number);
+    /// accept exactly client_number amount of clients
+    for (int i = 0; i < client_number; i++){
+        connfd = accept(sockfd, NULL, 0);
+        if (connfd < 0){
+            fprintf(stderr, "Couldn't accept socket %d\n", i);
+            return -1;
+        }
+        client_socket_fds[i] = connfd;
     }
+
+    close(sockfd);
+
+    return 0;
+}
+
+
+/**
+ * This function serves basically the same purpose as above. It's the server
+ * receiving the info from the client and then respond to the client the
+ * server's info.
+ *
+ * So here the first part, establishing TCP connection, server listen
+ * and accept. And if there is no connection yet, the accept will block the
+ * process.
+ *
+ * Then the second part, exchange info, server first get info from
+ * client, and then send server info to client.
+ *
+ * @param ctx
+ * @param ib_port
+ * @param mtu
+ * @param connfd :the websocket of the client
+ * @param sl
+ * @param my_dest
+ * @param sgid_idx
+ * @return
+ */
+struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
+                                          int ib_port, enum ibv_mtu mtu,
+                                          int connfd, int sl,
+                                          const struct pingpong_dest *my_dest,
+                                          int sgid_idx) {
+
+
+
+    /**
+     * This part is trying to exchange information with the clients
+     */
+    struct pingpong_dest *rem_dest = NULL;
+    int n;  // random variable that is used a lot of the time
+
     char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
     char gid[33];
-
 
     n = read(connfd, msg, sizeof msg);
     if (n != sizeof msg) {
@@ -816,7 +838,6 @@ int poll_n_send_wc(struct pingpong_context *ctx, int n_complete){
                 return 1;
             }
         } while (ne < 1);
-        printf("polled 1 send\n");
         /// process each completed wr
         for (i = 0; i < ne; ++i) {
             // check correctness
