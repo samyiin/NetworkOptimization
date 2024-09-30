@@ -3,12 +3,12 @@ project(NetworkOptimization C)
 
 set(CMAKE_C_STANDARD 99)
 
-add_executable(Benchmark.client Benchmark/client.c
+add_executable(Benchmark.client Baseline/client.c
         LowLatencyProtocols/ib_functions.c
         LowLatencyProtocols/ib_functions.h
         LowLatencyProtocols/main.c)
 
-add_executable(Benchmark.server Benchmark/server.c)
+add_executable(Benchmark.server Baseline/server.c)
 
 # Not really important in part two
 add_executable(server Optimization/bw_template.c)
