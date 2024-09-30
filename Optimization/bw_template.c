@@ -67,7 +67,7 @@
  * when RX_DEPTH is too high, when we send large messages, speed will drop.
  * probably because it exceeds the buffer size, so the send request is queued?
  */
-#define TX_DEPTH 5000
+#define TX_DEPTH 4800
 #define RX_DEPTH 5000
 
 /*
@@ -91,7 +91,7 @@
  * As long as we refill before the client send more messages, it won't make
  * a difference if we refill faster.
  */
-# define REFILL_RWR_THRES 10
+# define REFILL_RWR_THRES 100
 
 /*
  * Number of iterations is the bigger the better. The problem is just wast
