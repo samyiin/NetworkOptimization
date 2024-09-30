@@ -22,7 +22,7 @@
 
 
 /// The number of clients
-#define NUM_CLIENTS 2
+#define NUM_CLIENTS 1
 
 
 /**

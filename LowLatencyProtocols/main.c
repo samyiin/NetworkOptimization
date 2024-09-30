@@ -3,7 +3,7 @@
 //
 #include <time.h>
 # include "kv_api.h"
-# define NUM_THROUGHPUT_ITERATIONS 5
+# define NUM_THROUGHPUT_ITERATIONS 1024
 
 int shut_down_server(void *kv_handle){
     KVHandle *ptr_kv_handle = (KVHandle *) kv_handle;
@@ -173,7 +173,7 @@ int main(int argc, char *argv[])
 
     if (perform_throughput_test){
         if (!servername){
-            run_server(kv_handle, 1);
+            run_server(kv_handle, 0);
         } else{
             printf("=====================================================\n");
             printf("Test kv_set\n");
@@ -187,7 +187,7 @@ int main(int argc, char *argv[])
         }
     }else {
         if (!servername){
-            run_server(kv_handle, 0);
+            run_server(kv_handle, 1);
         } else{
             execute_input_command(input_file, kv_handle);
             shut_down_server(kv_handle);
