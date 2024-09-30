@@ -191,6 +191,7 @@ static int deregister_rdma_mr(KeyValueAddressArray *database, char *key){
     /// Deregister the rdma mr
     struct MRInfo *mr_rdma = get_kv_pair->mr_rdma;
     if (mr_rdma == NULL){
+//        fprintf(stderr, "nothing to deregister for mr of %s!\n", key);
         return 0;
     }
     if (ibv_dereg_mr(mr_rdma->mr)) {
@@ -198,7 +199,6 @@ static int deregister_rdma_mr(KeyValueAddressArray *database, char *key){
         return 1;
     }
     free(mr_rdma);
-
     /// Update the key_pair status
     get_kv_pair->mr_rdma = NULL;
     return 0;
@@ -221,7 +221,7 @@ static void print_dynamic_array(KeyValueAddressArray *my_array){
         }else{
             in_rdma_progress = "USING";
         }
-        printf("Entry: %2d, Key: %.6s, value: %-8.8s, value size: %6zu, "
+        printf("Entry: %2d Key: %-10.10s value: %-10.10s value size: %6zu "
                "state: %6s\n",
                i,
                my_key,

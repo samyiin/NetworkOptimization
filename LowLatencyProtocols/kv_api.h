@@ -44,6 +44,7 @@ enum Operation{
     CLIENT_KV_GET_RENDEZVOUS_FIN = 8,
     CLIENT_KV_SET_RENDEZVOUS_FIN = 9,
     SERVER_KV_SET_SUCCESSFUL = 10,
+    SERVER_KV_GET_SUCCESSFUL = 11,
 };
 
 /**
@@ -103,9 +104,7 @@ int kv_close(void *kv_handle);
 
 void kv_release(char *value);
 
-int run_client(KVHandle *ptr_kv_handle, Task *tasks, int num_tasks);
-
-int run_server(KVHandle *kv_handle);
+int run_server(KVHandle *kv_handle,  int print_database);
 
 ///============================================================================
 ///                              Protocol

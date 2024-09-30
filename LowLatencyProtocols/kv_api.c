@@ -69,7 +69,6 @@ int kv_open(char *servername, void **kv_handle) {
     }
     ptr_kv_handle->num_remote_host = num_remote_host;
 
-    // todo: free this two + free remote dest in array_remote_dest
     ptr_kv_handle->array_ctx_ptr = malloc(sizeof(struct pingpong_context*) *
             num_remote_host);
     ptr_kv_handle->array_remote_dest = malloc(sizeof(struct pingpong_dest*)
@@ -181,12 +180,14 @@ int kv_open(char *servername, void **kv_handle) {
          * connects to it.
          */
         if (servername) {
-            ptr_kv_handle->rem_dest = pp_client_exch_dest(servername,
+            ptr_kv_handle->array_remote_dest[remote_host_id] = pp_client_exch_dest(servername,
                                                           ptr_kv_handle->port,
                                                           &(ptr_kv_handle->my_dest));
+            ptr_kv_handle->rem_dest = ptr_kv_handle->array_remote_dest [remote_host_id];
+
         } else {
             int connfd = array_client_socket[remote_host_id];
-            ptr_kv_handle->array_remote_dest [remote_host_id] = pp_server_exch_dest(ptr_kv_handle->ctx,
+            ptr_kv_handle->array_remote_dest[remote_host_id] = pp_server_exch_dest(ptr_kv_handle->ctx,
                                                                     ptr_kv_handle->ib_port,
                                                                     ptr_kv_handle->mtu,
                                                                     connfd,
@@ -271,6 +272,7 @@ int kv_set(void *kv_handle, const char *key, const char *value) {
             fprintf(stderr, "kv_set EAGER: cannot send message\n");
             return 1;
         }
+
         /// blocking, see if there is a control message
         ControlMessage *remote_control_message;
         int polled_message = get_remote_control_message(ptr_kv_handle,
@@ -281,11 +283,13 @@ int kv_set(void *kv_handle, const char *key, const char *value) {
             return 1;
         }
         if  (remote_control_message->operation == SERVER_IN_PROGRESS){
-            printf("Failed when setting %s \n", key);
-            return 1;
+            fprintf(stderr,"KV_SET_REND: This key is in progress!\n");
+            return 2;
         }else if (remote_control_message->operation ==SERVER_KV_SET_SUCCESSFUL){
-            printf("Success when setting %s \n", key);
             return 0;
+        }else{
+            fprintf(stderr, "kv_set eager final: got weird message\n");
+            return 1;
         }
     } else {// Rendezvous
         /// send a control message to the server: key + value size (size_t)
@@ -319,13 +323,14 @@ int kv_set(void *kv_handle, const char *key, const char *value) {
             return 1;
         }
         if  (remote_control_message->operation == SERVER_IN_PROGRESS){
+            fprintf(stderr,"KV_SET_REND: This key is in progress!\n");
             if (ibv_dereg_mr(temp_mr_rdma->mr)) {
-                fprintf(stderr, "Couldn't deregister MR_control_send\n");
-                return 1;
+                fprintf(stderr, "KV_SET REND: SERVER_IN_PROGRESS Couldn't "
+                                "deregister MR_control_send\n");
+                return 3;
             }
             free(temp_mr_rdma);
-            printf("Failed when setting %s \n", key);
-            return 1;
+            return 2;
         }
 
         /// decode remote control message
@@ -369,9 +374,22 @@ int kv_set(void *kv_handle, const char *key, const char *value) {
         ptr_kv_handle->ctx->mr_rdma_size = 0;
         ptr_kv_handle->ctx->remote_buf_rkey = 0;
         ptr_kv_handle->ctx->remote_buf_va = 0;
-        return 0;
+
+        /// blocking, see if there is a control message
+        polled_message = get_remote_control_message(ptr_kv_handle,
+                                                    &remote_control_message,
+                                                    1);
+        if (polled_message != 0){
+            /// there is something wrong so we didn't get message after blocking
+            return 1;
+        }
+        if (remote_control_message->operation ==SERVER_KV_SET_SUCCESSFUL){
+            return 0;
+        }else{
+            fprintf(stderr, "kv_set eager final: got weird message\n");
+            return 1;
+        }
     }
-    return 0;
 }
 
 
@@ -415,7 +433,7 @@ int kv_get(void *kv_handle, const char *key, char **var) {
                                       array_ptr_to_fill);
         char *buf_value_address = array_ptr_to_fill[0];
         // store to local buffer
-        *var = malloc(strlen(buf_value_address) + 1);   // freed in kv_release
+        *var = malloc(strlen(buf_value_address) + 1);// freed in kv_release
         strcpy(*var, buf_value_address);
         return 0;
     } else if (remote_control_message->operation == SERVER_KV_GET_RENDEZVOUS) {
@@ -452,7 +470,7 @@ int kv_get(void *kv_handle, const char *key, char **var) {
                             array_messages_address_1);
         pp_post_send(ptr_kv_handle->ctx);
         if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
-            fprintf(stderr, "kv_set KV_SET_FIN: cannot send message\n");
+            fprintf(stderr, "kv_get CLIENT_KV_GET_RENDEZVOUS_FIN: cannot send message\n");
             return 1;
         }
 
@@ -464,6 +482,21 @@ int kv_get(void *kv_handle, const char *key, char **var) {
 
         ptr_kv_handle->ctx->mr_rdma_start_ptr = NULL;
         ptr_kv_handle->ctx->mr_rdma_size = 0;
+
+        /// blocking, see if there is a control message
+        polled_message = get_remote_control_message(ptr_kv_handle,
+                                                    &remote_control_message,
+                                                    1);
+        if (polled_message != 0){
+            /// there is something wrong so we didn't get message after blocking
+            return 1;
+        }
+        if (remote_control_message->operation ==SERVER_KV_GET_SUCCESSFUL){
+            return 0;
+        }else{
+            fprintf(stderr, "kv_set eager final: got weird message\n");
+            return 1;
+        }
     }else if (remote_control_message->operation == SERVER_IN_PROGRESS){
         /// probably SERVER_IN_PROGRESS, but we don't need to read it.
         *var = NULL;
@@ -490,12 +523,13 @@ int kv_close(void *kv_handle) {
     for (int i = 0; i < ptr_kv_handle->num_remote_host; i++){
         ptr_kv_handle->ctx = ptr_kv_handle->array_ctx_ptr[i];
         pp_close_ctx(ptr_kv_handle->ctx);
+    }
+    for (int i = 0; i < ptr_kv_handle->num_remote_host; i++){
         ptr_kv_handle->rem_dest = ptr_kv_handle->array_remote_dest[i];
         free(ptr_kv_handle->rem_dest);
     }
     free(ptr_kv_handle->array_ctx_ptr);
     free(ptr_kv_handle->array_remote_dest);
-    pp_close_ctx(ptr_kv_handle->ctx);
     ibv_free_device_list(ptr_kv_handle->dev_list);
     return 0;
 }
@@ -522,7 +556,8 @@ void kv_release(char *value) {
  * @return
  */
 int handle_CLIENT_KV_SET_RENDEZVOUS_FIN(KeyValueAddressArray *database,
-                                        ControlMessage *remote_control_message){
+                                        ControlMessage *remote_control_message,
+                                        KVHandle *ptr_kv_handle){
     /// decode the messages in remote control buffer
     // It should contain key + value size
     void *array_ptr_to_fill[1];
@@ -533,12 +568,23 @@ int handle_CLIENT_KV_SET_RENDEZVOUS_FIN(KeyValueAddressArray *database,
 
     // deregister it's rdma memory region
     deregister_rdma_mr(database, buf_key_address);
+
+    /// Send success message to client
+    // should specify which key
+    set_control_message(ptr_kv_handle, SERVER_KV_SET_SUCCESSFUL, NULL);
+    pp_post_send(ptr_kv_handle->ctx);
+    if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+        fprintf(stderr, "handle_CLIENT_KV_SET_RENDEZVOUS_FIN: cannot send message\n");
+        return 1;
+    }
     return 0;
 }
 
 
 int handle_CLIENT_KV_GET_RENDEZVOUS_FIN(KeyValueAddressArray *database,
-                                        ControlMessage *remote_control_message){
+                                        ControlMessage
+                                        *remote_control_message, KVHandle
+                                        *ptr_kv_handle){
     /// decode the messages in remote control buffer
     // It should contain key + value size
     void *array_ptr_to_fill[1];
@@ -549,6 +595,14 @@ int handle_CLIENT_KV_GET_RENDEZVOUS_FIN(KeyValueAddressArray *database,
 
     // deregister it's rdma memory region
     deregister_rdma_mr(database, buf_key_address);
+    /// Send success message to client
+    // should specify which key
+    set_control_message(ptr_kv_handle, SERVER_KV_GET_SUCCESSFUL, NULL);
+    pp_post_send(ptr_kv_handle->ctx);
+    if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+        fprintf(stderr, "handle_CLIENT_KV_GET_RENDEZVOUS_FIN: cannot send message\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -571,17 +625,19 @@ int handle_RENDEZVOUS_KV_SET_KEY(KeyValueAddressArray *database,
     KeyValueAddressPair *get_kv_pair = get_KeyValueAddressPair(database,
                                                                buf_key_address);
 
-
     /// the key pair is in progress
-    if (get_kv_pair->mr_rdma != NULL){
-        set_control_message(ptr_kv_handle, SERVER_IN_PROGRESS, NULL);
-        pp_post_send(ptr_kv_handle->ctx);
-        if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
-            fprintf(stderr, "handle_CLIENT_KV_GET SERVER_IN_PROGRESS: cannot send message\n");
-            return 1;
+    if (get_kv_pair != NULL){
+        if (get_kv_pair->mr_rdma != NULL){
+            set_control_message(ptr_kv_handle, SERVER_IN_PROGRESS, NULL);
+            pp_post_send(ptr_kv_handle->ctx);
+            if (poll_n_send_wc(ptr_kv_handle->ctx, 1) != 0) {
+                fprintf(stderr, "handle_CLIENT_KV_GET SERVER_IN_PROGRESS: cannot send message\n");
+                return 1;
+            }
+            return 0;
         }
-        return 0;
     }
+
 
     /// Copy key and value_size from remote_control_message buffer to local
     size_t key_length = strlen(buf_key_address) + 1;
@@ -772,11 +828,11 @@ int handle_CLIENT_KV_GET(KeyValueAddressArray *database, ControlMessage
  * Server will just run this function, and respond to the clients requests
  * @return
  */
-int run_server(KVHandle *ptr_kv_handle) {
+int run_server(KVHandle *ptr_kv_handle, int print_database) {
     /// Initialize database: basically array of (key_addr, value_addr)
     set_kv_malloc();    // in server database we will malloc for key value
     KeyValueAddressArray *database = initialize_KeyValueAddressArray(20);
-
+    int num_shut_down_server_request = 0;
     while (1) {
         /// for each client, see if they send any messages
         for (int i = 0; i < ptr_kv_handle->num_remote_host; i++){
@@ -792,48 +848,57 @@ int run_server(KVHandle *ptr_kv_handle) {
                 continue;
             }
 
+
             /// handle it
+            char operation_to_print[100];
             // if we get a message from any client to tell us finish experiment
             if (remote_control_message->operation == SHUT_DOWN_SERVER) {
-                printf("shutting down!\n");
-                // todo: need a break flag
-                break;
+                num_shut_down_server_request ++;
+                if (num_shut_down_server_request ==
+                ptr_kv_handle->num_remote_host){
+                    sprintf(operation_to_print,  "shutting down!\n");
+                    /// free the database and every allocated memory inside
+                    free_array(database);
+                    return 0;
+                }
             }
-                // eager kv_set
+            // eager kv_set
             else if (remote_control_message->operation == CLIENT_KV_SET_EAGER) {
-                printf("run_server client %d CLIENT_KV_SET_EAGER!\n", i);
+                sprintf(operation_to_print,  "run_server client %d "
+                                             "CLIENT_KV_SET_EAGER!\n", i);
+
                 handle_EAGER_KV_SET(database, remote_control_message,
                                     ptr_kv_handle);
-                /// for testing: todo: to delete
-                print_dynamic_array(database);
             }
-                // rdma_kv_set client send key
+            // rdma_kv_set client send key
             else if (remote_control_message->operation == CLIENT_KV_SET_RENDEZVOUS) {
-                printf("run_server client %d CLIENT_KV_SET_RENDEZVOUS!\n", i);
+                sprintf(operation_to_print, "run_server client %d "
+                                           "CLIENT_KV_SET_RENDEZVOUS!\n", i);
                 handle_RENDEZVOUS_KV_SET_KEY(database, remote_control_message,
                                              ptr_kv_handle);
-                /// for testing: todo: to delete
-                print_dynamic_array(database);
 
             }
             else if (remote_control_message->operation == CLIENT_KV_GET_RENDEZVOUS_FIN){
-                printf("run_server client %d CLIENT_KV_GET_RENDEZVOUS_FIN!\n", i);
+                sprintf(operation_to_print,"run_server client %d CLIENT_KV_GET_RENDEZVOUS_FIN!\n", i);
                 handle_CLIENT_KV_GET_RENDEZVOUS_FIN(database,
-                                                    remote_control_message);
-                /// for testing: todo: to delete
-                print_dynamic_array(database);
+                                                    remote_control_message,
+                                                    ptr_kv_handle);
             }
                 // kv_get: CLIENT_KV_GET
             else if (remote_control_message->operation == CLIENT_KV_GET) {
-                printf("run_server client %d CLIENT_KV_GET!\n", i);
+                sprintf(operation_to_print,"run_server client %d CLIENT_KV_GET!\n", i);
                 handle_CLIENT_KV_GET(database, remote_control_message, ptr_kv_handle);
-                /// for testing: todo: to delete
+            } else if (remote_control_message->operation ==
+            CLIENT_KV_SET_RENDEZVOUS_FIN){
+                sprintf(operation_to_print,"run_server client %d CLIENT_KV_SET_RENDEZVOUS_FIN!\n", i);
+                handle_CLIENT_KV_SET_RENDEZVOUS_FIN(database,
+                                                    remote_control_message,
+                                                    ptr_kv_handle);
+            }
+            if (print_database==1){
+                printf("%s\n", operation_to_print);
                 print_dynamic_array(database);
             }
         }
-
     }
-
-    /// free the database and every allocated memory inside
-    free_array(database);
 }
