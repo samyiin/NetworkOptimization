@@ -2,7 +2,7 @@
 ## Description
 In this project, we aimed to set up a key value remote database. The clients can store the key:value pair in the server, and letter it can retrieve the value corresponds to the key from the serve. 
 We will use RDMA to increase the speed of data transfer between clients and server. 
-### Benchmark (Baseline)
+### Baseline
 We use a tcp socket to test what is the baseline speed of data transfer for different data size. 
 ### Optimization 
 We use RDMA write to test what is the theoretical speed of transferring data when using rdma write. 
